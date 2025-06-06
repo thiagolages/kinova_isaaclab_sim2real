@@ -11,14 +11,14 @@ from . import agents
 # Register Gym environments.
 ##
 
-print("Registering Gen3 Reach Gym environment...")
+print("Registering Gen3 Skimmer Gym environment...")
 gym.register(
-    id="Gen3-Reach-v0",
+    id="Gen3-Skimmer-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:Gen3ReachEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Gen3ReachPPORunnerCfg",
+        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:Gen3SkimmerEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Gen3SkimmerPPORunnerCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
 )
