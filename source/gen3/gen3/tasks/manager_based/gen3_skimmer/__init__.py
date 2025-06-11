@@ -17,7 +17,7 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:Gen3SkimmerEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.skimmer_env_cfg:Gen3SkimmerEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:Gen3SkimmerPPORunnerCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },

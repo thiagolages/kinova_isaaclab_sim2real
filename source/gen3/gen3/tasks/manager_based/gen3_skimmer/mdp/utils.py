@@ -22,28 +22,29 @@ def dist_eff_to_target_z_axis(eff_pos, target):
         raise ValueError("eff_pos must be a 3D vector (3,)")
 
     # Convert target_quat from scalar-last (x, y, z, w) to scalar-first (w, x, y, z)
-    print("target_quat before = ", target_quat)
+    #print("target_quat before = ", target_quat)
     target_quat = torch.cat([target_quat[:, 1:4], target_quat[:, 0:1]], dim=1)
-    print("target_quat after = ", target_quat)
+    #print("target_quat after = ", target_quat)
     target_rot = torch.tensor(R.from_quat(target_quat.cpu()).as_matrix(),dtype=torch.float, device=eff_pos.device)  # Convert quaternion to rotation matrix
-    print("target_rot = ", target_rot)
+    #print("target_rot = ", target_rot)
     # Sanity check for rotation matrix
     if target_rot.shape[-2:] != (3, 3):
         raise ValueError("target_rot must have shape (num_envs, 3, 3)")
 
     dz_unit = target_rot[:, 2]  # Extract the z-axis from the rotation matrix
-    print("dz_unit =", dz_unit)
-    print("eff_pos =", eff_pos)
-    print("target_pos =", target_pos)
+    #print("dz_unit =", dz_unit)
+    #print("eff_pos =", eff_pos)
+    #print("target_pos =", target_pos)
     vec = eff_pos - target_pos  # Vector from end effector to target    
-    print("vec = eff_pos - target_pos = ", vec)
+    #print("vec = eff_pos - target_pos = ", vec)
     proj_length = torch.sum(vec * dz_unit, dim=1, keepdim=True)  # (N, 1)
     proj_vec = proj_length * dz_unit  # (N, 3)
-    print("proj_vec =", proj_vec)
+    #print("proj_vec =", proj_vec)
     perp_vec = vec - proj_vec  # Perpendicular vector from effector to the line
-    print("perp_vec =", perp_vec)
+    #print("perp_vec =", perp_vec)
     dist = torch.norm(perp_vec, dim=1, keepdim=True)  # (N, 1) norm vector
-    print("dist =", dist)
+    #print("dist =", dist)
+    dist = dist.squeeze(-1)
 
     return dist
 
@@ -71,7 +72,7 @@ def dist_eff_to_target_xy_plane(eff_pos, target):
     
     # Signed distance: projection onto normal
     # The * operator is doing a dot product
-    print("vec * z_axis_world = ",vec * z_axis_world)
+    # print("vec * z_axis_world = ",vec * z_axis_world)
     signed_dist = torch.sum(vec * z_axis_world, dim=1)
     
     return signed_dist

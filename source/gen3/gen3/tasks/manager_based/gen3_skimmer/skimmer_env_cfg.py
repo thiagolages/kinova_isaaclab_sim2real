@@ -8,9 +8,11 @@ import math
 from isaaclab.utils import configclass
 
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
+# from isaaclab.envs.rewards import rewards as isaaclab_rewards
 import gen3.tasks.manager_based.gen3_skimmer.mdp as mdp_skimmer
 from isaaclab_tasks.manager_based.manipulation.reach.reach_env_cfg import ReachEnvCfg
-from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import RewardTermCfg
+from isaaclab.managers import TerminationTermCfg
 from isaaclab.managers import SceneEntityCfg
 # from isaaclab.scene import RigidObjectCfg, InitialStateCfg, UsdPropertiesCfg
 # from isaaclab.sim.spawners.materials.materials_cfg import VisualMaterialCfg # For visual appearance
@@ -19,12 +21,29 @@ from isaaclab.managers import SceneEntityCfg
 # Pre-defined configs
 ##
 from isaaclab_assets import KINOVA_GEN3_N7_CFG  # isort: skip
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 
 ##
 # Environment configuration
 ##
 
+from isaaclab.envs import ManagerBasedRLEnv
+    
+def check_singularity(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    eff_name: str,
+    threshold: float = 0.01
+    ):
+    """
+    Terminates the episode if the manipulability is below a threshold (i.e., near singularity).
+    """
+    # Compute manipulability for all envs
+    reward = mdp_skimmer.manipulability_reward(env, asset_cfg, eff_name)  # (num_envs,)
+    # Find envs where manipulability is below threshold
+    done_mask = reward < threshold
+    return done_mask
 
 @configclass
 class Gen3SkimmerEnvCfg(ReachEnvCfg):
@@ -38,6 +57,13 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
 
         # 1. Switch robot to Kinova Gen3 N7
         self.scene.robot = KINOVA_GEN3_N7_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.table.spawn.usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/ThorlabsTable/table_instanceable.usd"
+        self.scene.table.init_state.pos = (0.1, 0.0, 0.0)
+        self.scene.table.init_state.rot = (1.0, 0.0, 0.0, 0.0) # wxyz
+        
+        # Config for f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd"
+        #self.scene.table.init_state.pos = (-0.6, 0.0, 0.0)
+        #self.scene.table.init_state.rot = (0.70711, 0.0, 0.0, -0.70711) # wxyz        
         
         # 2. Override events
         self.events.reset_robot_joints.params["position_range"] = (0.75, 1.25)
@@ -46,16 +72,28 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # 3.1. Fill in the body names for end-effector tracking
         self.rewards.end_effector_position_tracking.params["asset_cfg"].body_names = [eff_link]
         self.rewards.end_effector_position_tracking_fine_grained.params["asset_cfg"].body_names = [eff_link]
-        self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = [eff_link]
+
+        self.rewards.end_effector_orientation_tracking = RewardTermCfg(
+            func=mdp_skimmer.end_effector_orientation_tracking,
+            weight=-0.1,  # negative
+            params={
+                "asset_cfg": scene_entity_cfg,
+            }
+        )
+        #self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = [eff_link]
         
+        # Increase the weight of end-effector position tracking
+        self.rewards.end_effector_position_tracking.weight = -0.4 # negative
+        self.rewards.end_effector_position_tracking_fine_grained.weight = 0.2 # positive
+
         # 3.2. Add cone penalty for collision avoidance
         # This means that at `cone_h` height from the target, the cone base has radius `cone_r`
-        cone_h = 0.50 # 50cm
-        cone_r = 0.15 # 15cm
+        cone_h = 0.20 # 20cm
+        cone_r = 0.10 # 10cm
 
-        self.rewards.cone_penalty = RewTerm(
+        self.rewards.cone_penalty = RewardTermCfg(
             func=mdp_skimmer.cone_penalty,
-            weight=-5.0,
+            weight=-1.5,
             params={
                 "asset_cfg": scene_entity_cfg,
                 "command_name": ee_pose_cmd,
@@ -65,6 +103,35 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
                 "delta_h": 1.0,
             }
         )
+
+        # ERRO DE std >= 0.0 ESTÁ AQUI
+        # self.rewards.manipulability = RewardTermCfg(
+        #     func=mdp_skimmer.manipulability_reward,
+        #     weight=1,
+        #     params={
+        #         "asset_cfg": scene_entity_cfg,
+        #         "eff_name": eff_link,
+        #     }
+        # )      
+        # 
+        #  # Add event to terminate episode on singularity
+        # self.terminations.singularity = TerminationTermCfg(
+        #     func=check_singularity,
+        #     params={
+        #         "asset_cfg": scene_entity_cfg,
+        #         "eff_name": eff_link,
+        #         "threshold": 0.01,  # Threshold for manipulability
+        #     }
+        # ) 
+
+        # self.rewards.joint_limits = RewardTermCfg(
+        #     func=mdp_skimmer.joint_limit_penalty,
+        #     weight=-0.1,
+        #     params={
+        #         "asset_cfg": scene_entity_cfg,
+        #     }
+        # )
+        
 
         # # Add a visualization cone to the scene
         # # The USD Cone primitive has its origin at the center of its base.
@@ -102,4 +169,11 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # 5. Override command generator body
         # end-effector is along x-direction
         self.commands.ee_pose.body_name = eff_link
-        self.commands.ee_pose.ranges.pitch = (math.pi / 2, math.pi / 2)
+        
+        # Makes the Reach env sample from these command ranges (in 'UniformPoseCommandCfg')
+        self.commands.ee_pose.ranges.pos_x = (0.35, 0.65)
+        self.commands.ee_pose.ranges.pos_y = (-0.35, 0.35)
+        self.commands.ee_pose.ranges.pos_z = (0.25, 0.30) # Keeps Z position close to table
+        self.commands.ee_pose.ranges.roll = (math.radians(-20), math.radians(20)) # Rotates a bit around the X axis
+        self.commands.ee_pose.ranges.pitch = (math.radians(-20), math.radians(20)) # Keeps Z axis up  with some tilt
+        self.commands.ee_pose.ranges.yaw = (-math.pi, math.pi) # Rotate around Z axis
