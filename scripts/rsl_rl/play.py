@@ -101,6 +101,8 @@ def main():
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
+    print("Resume path:", resume_path)
+
     log_dir = os.path.dirname(resume_path)
 
     # create isaac environment
@@ -152,6 +154,7 @@ def main():
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
+            # print("Actions[0] = ", actions[0])
             # env stepping
             obs, _, _, _ = env.step(actions)
         if args_cli.video:

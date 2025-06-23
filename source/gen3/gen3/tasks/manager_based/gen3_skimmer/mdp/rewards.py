@@ -12,7 +12,8 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import wrap_to_pi
 from isaaclab.assets import RigidObject
-from isaaclab.utils.math import combine_frame_transforms
+from isaaclab.utils.math import combine_frame_transforms, quat_mul, angle_between_vecs
+from scipy.spatial.transform import Rotation as R
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -28,32 +29,120 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
     # compute the reward
     return torch.sum(torch.square(joint_pos - target), dim=1)
 
-def end_effector_orientation_tracking(
+def get_z_axis(quat, effector: bool = True) -> torch.Tensor:
+    if effector:
+        eff_quat_w = quat
+        eff_quat_w_xyzw = torch.cat([eff_quat_w[:, 1:], eff_quat_w[:, :1]], dim=1).cpu().numpy()  # (num_envs, 4)
+        eff_quat_w_xyzw_rot_mat = R.from_quat(eff_quat_w_xyzw)
+        eff_rotmat = torch.from_numpy(eff_quat_w_xyzw_rot_mat.as_matrix()).to(eff_quat_w.device).type(eff_quat_w.dtype)  # (num_envs, 3, 3)
+        z_axis = eff_rotmat[:, :, 2]  # (num_envs, 3)
+        # print("eff_quat_w[0]:", eff_quat_w[0])
+        # print("eff_quat_w_xyzw[0]:", eff_quat_w_xyzw[0])
+        # print("eff_quat_w_xyzw_rot_mat[0]:\n", eff_quat_w_xyzw_rot_mat[0].as_matrix())
+        # print("eff_rotmat[0]:", eff_rotmat[0])
+        # print("eff_z_axis[0]:", z_axis[0])
+    else:
+        des_quat_w = quat
+        des_quat_w_xyzw = torch.cat([des_quat_w[:, 1:], des_quat_w[:, :1]], dim=1).cpu().numpy()  # (num_envs, 4)
+        des_quat_w_xyzw_rot_mat = R.from_quat(des_quat_w_xyzw)
+        target_rotmat = torch.from_numpy(des_quat_w_xyzw_rot_mat.as_matrix()).to(des_quat_w.device).type(des_quat_w.dtype)  # (num_envs, 3, 3)
+        z_axis = target_rotmat[:, :, 2]  # (num_envs, 3)
+        # print("des_quat_w[0]:", des_quat_w[0])
+        # print("des_quat_w_xyzw[0]:", des_quat_w_xyzw[0])
+        # print("des_quat_w_xyzw_rot_mat[0]:\n", des_quat_w_xyzw_rot_mat[0].as_matrix())
+        # print("target_rotmat[0]:", target_rotmat[0])
+        # print("target_z[0]:", z_axis[0])
+    
+    return z_axis
+
+def end_effector_orientation_tracking_sin(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg,
+    command_name: str
 ) -> torch.Tensor:
-    """Penalize the end-effector orientation deviation from Z pointing up."""
+    """Penalize the end-effector orientation deviation from Z pointing up using sin(theta) of the angle."""
     # Get the robot articulation
     robot: Articulation = env.scene[asset_cfg.name]
-
-    # Vector representing Z pointing up in world frame
-    target_z = torch.tensor(
-        [0.0, 0.0, 1.0], device=env.device
-    )
+    command = env.command_manager.get_command(command_name)
 
     # Get the end-effector orientation in world frame
-    eff_quat_w = robot.data.body_state_w[:, asset_cfg.body_ids[0], 3:7]# (num_envs, 4),(w, x, y, z)
-    
-    # Convert quaternion to rotation matrix
-    eff_rotmat = torch.quaternion_to_matrix(eff_quat_w)  # (num_envs, 3, 3)
-    
-    # Extract the last column (Z axis in world frame)
-    eff_z_axis = eff_rotmat[:, :, 2]  # (num_envs, 3)
+    eff_quat_w = robot.data.body_state_w[:, asset_cfg.body_ids[0], 3:7]  # (num_envs, 4), (w, x, y, z)
+    eff_z_axis = get_z_axis(eff_quat_w, effector=True)
 
-    # Compute the orientation error
-    cos_theta = (eff_z_axis * target_z).sum(-1).clamp(-1.0, 1.0)  # (num_envs,)
+    # Target Z
+    # obtain the desired and current orientations
+    des_quat_b = command[:, 3:7]
+    # print("des_quat_b[0]:", des_quat_b[0])
     
-    return 1.0 - cos_theta  # Return the tracking error as a reward
+    des_quat_w = quat_mul(robot.data.root_quat_w, des_quat_b)
+    target_z = get_z_axis(des_quat_w, effector=False)
+
+    theta_deg = angle_between_vecs(eff_z_axis, target_z)
+    # # --- 5. Perform vector calculations ---
+    # v1 = eff_z_axis
+    # v2 = target_z
+    # norm_v1 = torch.linalg.norm(v1, dim=1)
+    # norm_v2 = torch.linalg.norm(v2, dim=1)
+    # product_of_norms = norm_v1 * norm_v2
+
+    # # Cross product for a batch of vectors
+    # cross_prod = torch.cross(v1, v2, dim=1)
+    # norm_cross_prod = torch.linalg.norm(cross_prod, dim=1)
+
+    # # Dot product for a batch of vectors (element-wise multiplication and sum)
+    # dot_prod = torch.sum(v1 * v2, dim=1)
+
+    # # --- 6. Calculate sine, cosine, and theta for the batch ---
+    # # Use a small epsilon to prevent division by zero for zero-length vectors
+    # epsilon = 1e-8
+    # sin_theta = norm_cross_prod / (product_of_norms + epsilon)
+    # # cos_theta = torch.clamp(dot_prod / (product_of_norms + epsilon), -1.0, 1.0)
+    
+    # theta_rad = torch.atan2(norm_cross_prod, dot_prod)
+    # theta_deg = torch.rad2deg(theta_rad)
+
+
+
+    
+
+    # Compute the cross product and its norm (sin(theta) = ||a x b|| / (||a||*||b||))
+    # cross = torch.cross(eff_z_axis, target_z.expand_as(eff_z_axis), dim=1)
+    # sin_theta = torch.norm(cross, dim=1) / (torch.norm(eff_z_axis, dim=1) * torch.norm(target_z))
+
+    # Print all variables for the first environment only
+    
+    
+    # print("eff_z_axis[0]:", eff_z_axis[0])
+    # print("cross_prod[0]:", cross_prod[0])
+    # print("sin_theta[0]:", sin_theta[0])
+    # Calculate theta (in radians) from sin_theta for the first environment
+    # print("theta_rad (radians):", theta_rad[0].item())
+    # print("theta_deg (degrees):", theta_deg[0].item())
+
+    sin_theta = torch.sin(torch.deg2rad(theta_deg))  # Convert degrees to radians and compute sin(theta)
+
+    reward = 1.0 - sin_theta  # Return sin(theta) as the reward
+    # print("Reward for the first environment:", reward[0].item())
+    # print("Reward shape:", reward.shape)
+
+    if torch.isnan(reward).any() or torch.isinf(reward).any():
+        raise RuntimeError("ERROR: NaN or Inf detected in end_effector_orientation_tracking_sin reward!")
+
+    return reward 
+
+
+def end_effector_orientation_tracking_tanh(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    std: float = 0.1,  # Standard deviation for normalization
+) -> torch.Tensor:
+    """Penalize the end-effector orientation deviation from Z pointing up."""
+
+    reward = end_effector_orientation_tracking_sin(env, asset_cfg, command_name)
+
+    return 1.0 - torch.tanh(reward / std)  # Normalize the reward with a tanh kernel
+
 
 
 def cone_penalty(env: ManagerBasedRLEnv,
@@ -81,12 +170,21 @@ def cone_penalty(env: ManagerBasedRLEnv,
     # function called 'position_command_error'
     command = env.command_manager.get_command(command_name)
     
+    
+    ## Get robot pose
+    robot_pos_w = robot.data.root_state_w[:, :3]
+    robot_quat_w = robot.data.root_state_w[:, 3:7] # (w, x, y, z) format
+
     ## 1.2. Get target pose
     target_pos_b = command[:, :3] # (num_envs, 3)
+    target_quat_b = command[:, 3:7] # (num_envs, 4)
+
+    # Convert target pose to world frame
     target_pos_w, target_quat_w = combine_frame_transforms(
-        robot.data.root_state_w[:, :3],
-        robot.data.root_state_w[:, 3:7],
-        target_pos_b
+        robot_pos_w,
+        robot_quat_w,
+        target_pos_b,
+        target_quat_b
     ) # (num_envs, 3)
     
     ## 1.3. Get effector pose
@@ -126,13 +224,13 @@ def cone_penalty(env: ManagerBasedRLEnv,
     ## 3.1. delta_r scales penalty by how close the effector is to the center (r = 0), not normalized
     # Normalizes delta_r based on curent radius, so that this penalty doesn't diminish as we
     # approach the target.
-    delta_r = delta_r / r_at_current_h # (num_envs,)
+    delta_r = torch.clamp(delta_r / r_at_current_h, 0.0, 10.0) # (num_envs,)
 
     #print("delta_r = ", delta_r)
     #print("delta_r.shape = ", delta_r.shape)
 
     ## 3.2. delta_h scales penalty by how close we are from the target, in the Z direction of the cone (its height)
-    delta_h = delta_h * (cone_h - eff_cone_height) / cone_h # (num_envs,)
+    delta_h = torch.clamp(delta_h * (cone_h - eff_cone_height) / cone_h, 0.0, 10.0) # (num_envs,)
     #print("delta_h = ", delta_h)
     #print("delta_h.shape = ", delta_h.shape)
     # TODO: check if needs to be normalized
@@ -162,9 +260,11 @@ def cone_penalty(env: ManagerBasedRLEnv,
     penalty = delta_r * delta_h * r_error
     # nonzero_percentage = (penalty != 0).float().mean() * 100
     #print(f"Percentage of nonzero penalty elements: {nonzero_percentage.item():.2f}%")
-    #print("penalty = ", penalty)
-    #print("penalty.shape = ", penalty.shape)
-    print("NaNs/Infs in cone penalty {}/{}".format(torch.isnan(penalty).sum().item(), torch.isinf(penalty).sum().item()))
+    # print(f"penalty for cone = {penalty}")
+    # print("penalty.shape = ", penalty.shape)
+    # print("NaNs/Infs in cone penalty {}/{}".format(torch.isnan(penalty).sum().item(), torch.isinf(penalty).sum().item()))
+    # print("Penalty average:", penalty.mean().item())
+    # print("Top 10 penalty values:", torch.topk(penalty, 10).values)
 
     # Check for NaNs
     if torch.isnan(penalty).any() or torch.isinf(penalty).any():
@@ -175,53 +275,53 @@ def cone_penalty(env: ManagerBasedRLEnv,
     
     return penalty
 
-def manipulability_reward(
-    env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg,
-    eff_name: str,
-) -> torch.Tensor:
-    """
-    Compute the manipulability reward based on the end-effector pose and the target pose.
-    The reward is scaled by the manipulability scale factor.
-    """
-    robot: Articulation = env.scene[asset_cfg.name]
-    # command = env.command_manager.get_command(command_name)
+# def manipulability_reward(
+#     env: ManagerBasedRLEnv,
+#     asset_cfg: SceneEntityCfg,
+#     eff_name: str,
+# ) -> torch.Tensor:
+#     """
+#     Compute the manipulability reward based on the end-effector pose and the target pose.
+#     The reward is scaled by the manipulability scale factor.
+#     """
+#     robot: Articulation = env.scene[asset_cfg.name]
+#     # command = env.command_manager.get_command(command_name)
 
-    # Get the jacobian
-    geometric_jacobians = robot.root_physx_view.get_jacobians() #(num_envs, num_bodies, 6, total_dofs)
+#     # Get the jacobian
+#     geometric_jacobians = robot.root_physx_view.get_jacobians() #(num_envs, num_bodies, 6, total_dofs)
 
-    body_ids, _ = robot.find_bodies([eff_name], preserve_order=True)
-    ee_body_idx = body_ids[0]          # <- this is the index to use in jacobians
-    arm_joint_ids, _ = robot.find_joints(["^joint_[1-7]$"], preserve_order=True)
+#     body_ids, _ = robot.find_bodies([eff_name], preserve_order=True)
+#     ee_body_idx = body_ids[0]          # <- this is the index to use in jacobians
+#     arm_joint_ids, _ = robot.find_joints(["^joint_[1-7]$"], preserve_order=True)
 
-    # print("body_ids = ", body_ids)
-    # print("ee_body_idx = ", ee_body_idx)
-    # print("arm_joint_ids = ", arm_joint_ids)
-    # PhysX index is (body_idx – 1) because it skips the root link
-    J = geometric_jacobians[:, ee_body_idx - 1, :, arm_joint_ids] # (num_envs, 6, num_joints)
+#     # print("body_ids = ", body_ids)
+#     # print("ee_body_idx = ", ee_body_idx)
+#     # print("arm_joint_ids = ", arm_joint_ids)
+#     # PhysX index is (body_idx – 1) because it skips the root link
+#     J = geometric_jacobians[:, ee_body_idx - 1, :, arm_joint_ids] # (num_envs, 6, num_joints)
 
-    # yoshikawa_manipulability
-    JJt = J @ J.transpose(-2, -1) # 'change second-to-last dimension with last dimension'
+#     # yoshikawa_manipulability
+#     JJt = J @ J.transpose(-2, -1) # 'change second-to-last dimension with last dimension'
 
-    # Add small value to JJt to avoid NaNs close to singularities
-    JJt = JJt + 1e-12 * torch.eye(6, device=J.device)
+#     # Add small value to JJt to avoid NaNs close to singularities
+#     JJt = JJt + 1e-12 * torch.eye(6, device=J.device)
 
-    det = torch.abs(torch.det(JJt))
-    # Ensure det is not extremely small negative due to precision before abs, then sqrt
-    # though abs should handle it. Clamping to a small positive epsilon before sqrt is safest.
-    manipulability = torch.sqrt(torch.clamp(det, min=1e-24)) # Clamp to a very small positive before sqrt
-    # print("JJt = ", JJt)  # Added print statement for debugging
-    # print("J = ", J)  # Added print statement for debugging
-    # print("J shape = ", J.shape)  # Added print statement for debugging
-    # print("JJt shape = ", JJt.shape)  # Added print statement for debugging
-    # print("det = ", det)  # Added print statement for debugging
-    # print("manipulability reward = ", manipulability)  # Added print statement for debugging
-    print("NaNs/Infs in manipulability {}/{}".format(torch.isnan(manipulability).sum().item(), torch.isinf(manipulability).sum().item()))
+#     det = torch.abs(torch.det(JJt))
+#     # Ensure det is not extremely small negative due to precision before abs, then sqrt
+#     # though abs should handle it. Clamping to a small positive epsilon before sqrt is safest.
+#     manipulability = torch.sqrt(torch.clamp(det, min=1e-24)) # Clamp to a very small positive before sqrt
+#     # print("JJt = ", JJt)  # Added print statement for debugging
+#     # print("J = ", J)  # Added print statement for debugging
+#     # print("J shape = ", J.shape)  # Added print statement for debugging
+#     # print("JJt shape = ", JJt.shape)  # Added print statement for debugging
+#     # print("det = ", det)  # Added print statement for debugging
+#     # print("manipulability reward = ", manipulability)  # Added print statement for debugging
+#     print("NaNs/Infs in manipulability {}/{}".format(torch.isnan(manipulability).sum().item(), torch.isinf(manipulability).sum().item()))
     
-    if torch.isnan(manipulability).any() or torch.isinf(manipulability).any():
-        raise RuntimeError("ERROR: NaN or Inf detected in manipulability reward!")
+#     if torch.isnan(manipulability).any() or torch.isinf(manipulability).any():
+#         raise RuntimeError("ERROR: NaN or Inf detected in manipulability reward!")
 
-    return manipulability
+#     return manipulability
     
 
 # def joint_limit_penalty(
@@ -256,4 +356,3 @@ def manipulability_reward(
 #     if torch.isnan(penalty).any() or torch.isinf(penalty).any():
 #         raise RuntimeError("ERROR: NaN or Inf detected in joint_limit_penalty!")
     
-#     return penalty

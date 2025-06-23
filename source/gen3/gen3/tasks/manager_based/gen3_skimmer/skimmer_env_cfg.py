@@ -14,6 +14,8 @@ from isaaclab_tasks.manager_based.manipulation.reach.reach_env_cfg import ReachE
 from isaaclab.managers import RewardTermCfg
 from isaaclab.managers import TerminationTermCfg
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.markers.config import FRAME_MARKER_CFG
+from isaaclab.managers import RewardTermCfg as RewTerm
 # from isaaclab.scene import RigidObjectCfg, InitialStateCfg, UsdPropertiesCfg
 # from isaaclab.sim.spawners.materials.materials_cfg import VisualMaterialCfg # For visual appearance
 
@@ -55,11 +57,16 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         ee_pose_cmd = "ee_pose"
         scene_entity_cfg = SceneEntityCfg("robot", body_names=eff_link)
 
+        self.episode_length_s = 1e9
+
+        # 0. Set the scene spacing
+        self.scene.env_spacing = 1.5 # Spacing between environments in the scene
+        
         # 1. Switch robot to Kinova Gen3 N7
         self.scene.robot = KINOVA_GEN3_N7_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.table.spawn.usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/ThorlabsTable/table_instanceable.usd"
-        self.scene.table.init_state.pos = (0.1, 0.0, 0.0)
-        self.scene.table.init_state.rot = (1.0, 0.0, 0.0, 0.0) # wxyz
+        self.scene.table.init_state.pos = (0.0, 0.0, 0.0)
+        self.scene.table.init_state.rot = (0.0, 0.0, 0.0, 1.0) # wxyz
         
         # Config for f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd"
         #self.scene.table.init_state.pos = (-0.6, 0.0, 0.0)
@@ -73,27 +80,42 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         self.rewards.end_effector_position_tracking.params["asset_cfg"].body_names = [eff_link]
         self.rewards.end_effector_position_tracking_fine_grained.params["asset_cfg"].body_names = [eff_link]
 
-        self.rewards.end_effector_orientation_tracking = RewardTermCfg(
-            func=mdp_skimmer.end_effector_orientation_tracking,
-            weight=-0.1,  # negative
-            params={
-                "asset_cfg": scene_entity_cfg,
-            }
-        )
+
+        # self.rewards.end_effector_orientation_tracking_fine_grained = RewTerm(
+        #     func=mdp_skimmer.end_effector_orientation_tracking_tanh,
+        #     weight=0.1, # POSITIVE
+        #     params={
+        #         "asset_cfg": SceneEntityCfg("robot", body_names=[eff_link]), 
+        #         "command_name": "ee_pose",
+        #         "std": 0.1,  # Standard deviation for normalization
+        #     },
+        # )
         #self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = [eff_link]
         
         # Increase the weight of end-effector position tracking
-        self.rewards.end_effector_position_tracking.weight = -0.4 # negative
-        self.rewards.end_effector_position_tracking_fine_grained.weight = 0.2 # positive
+        self.rewards.end_effector_position_tracking.weight = -0.8 # negative
+        weight_end_effector_orientation_tracking_sin = -0.1 # negative
+        self.rewards.end_effector_position_tracking_fine_grained.weight = 1e-5 #0.4 # positive !
+        self.rewards.action_rate.weight = -0.0005 # negative
+        self.rewards.joint_vel.weight = -0.0005 # negative
+
+        self.rewards.end_effector_orientation_tracking = RewardTermCfg(
+            func=mdp_skimmer.end_effector_orientation_tracking_sin,
+            weight=weight_end_effector_orientation_tracking_sin,  # negative
+            params={
+                "asset_cfg": scene_entity_cfg,
+                "command_name": ee_pose_cmd,
+            }
+        )
 
         # 3.2. Add cone penalty for collision avoidance
         # This means that at `cone_h` height from the target, the cone base has radius `cone_r`
-        cone_h = 0.20 # 20cm
-        cone_r = 0.10 # 10cm
+        cone_h = 0.20 * 5 # 20cm
+        cone_r = 0.10 * 5 # 10cm
 
         self.rewards.cone_penalty = RewardTermCfg(
             func=mdp_skimmer.cone_penalty,
-            weight=-1.5,
+            weight=-15,
             params={
                 "asset_cfg": scene_entity_cfg,
                 "command_name": ee_pose_cmd,
@@ -121,6 +143,17 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         #         "asset_cfg": scene_entity_cfg,
         #         "eff_name": eff_link,
         #         "threshold": 0.01,  # Threshold for manipulability
+        #     }
+        # ) 
+
+        # Add event to terminate episode when close to target
+        # self.terminations.reached_target = TerminationTermCfg(
+        #     func=mdp_skimmer.reached_target,
+        #     params={
+        #         "asset_cfg": scene_entity_cfg,
+        #         "command_name": ee_pose_cmd,
+        #         "pos_threshold": 0.01,
+        #         "cos_theta_threshold": 0.26, # 0.26 represents ~cos(75deg), 15deg tolerance
         #     }
         # ) 
 
@@ -171,9 +204,16 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         self.commands.ee_pose.body_name = eff_link
         
         # Makes the Reach env sample from these command ranges (in 'UniformPoseCommandCfg')
-        self.commands.ee_pose.ranges.pos_x = (0.35, 0.65)
-        self.commands.ee_pose.ranges.pos_y = (-0.35, 0.35)
-        self.commands.ee_pose.ranges.pos_z = (0.25, 0.30) # Keeps Z position close to table
+        self.commands.ee_pose.ranges.pos_x = (0.2, 0.8)
+        self.commands.ee_pose.ranges.pos_y = (-0.40, 0.40)
+        self.commands.ee_pose.ranges.pos_z = (0.20, 1.0)
         self.commands.ee_pose.ranges.roll = (math.radians(-20), math.radians(20)) # Rotates a bit around the X axis
         self.commands.ee_pose.ranges.pitch = (math.radians(-20), math.radians(20)) # Keeps Z axis up  with some tilt
         self.commands.ee_pose.ranges.yaw = (-math.pi, math.pi) # Rotate around Z axis
+
+        # Apply the properties to the goal and current pose visualizers
+        # self.commands.ee_pose.goal_pose_visualizer_cfg.markers["frame"].usd_path = "/workspace/kinova_isaaclab_sim2real/arrow_z.usd"
+        # self.commands.ee_pose.current_pose_visualizer_cfg.markers["frame"].usd_path = "/workspace/kinova_isaaclab_sim2real/arrow_z.usd"
+        # # Set the overall scale to 1.0 since we are controlling individual parts
+        # self.commands.ee_pose.goal_pose_visualizer_cfg.markers["frame"].scale = (0.025, 0.025, 0.15) # Z axis 10x bigger
+        # self.commands.ee_pose.current_pose_visualizer_cfg.markers["frame"].scale = (0.025, 0.025, 0.20) # Z axis 10x bigger

@@ -146,11 +146,15 @@ def main():
     obs, _ = env.get_observations()
     timestep = 0
     # Define your home pose (adjust as needed)
-    home_pos = torch.tensor([0.5, 0.0, 0.70], device=env.unwrapped.device)  # Example position
-    home_quat = torch.tensor([ 0.707, 0.0, 0.0,  0.707], device=env.unwrapped.device)  # Z pointing to the side (rotation of 90deg around X) (xyzw)
+    home_pos = torch.tensor([0.5, 0.0, 0.80], device=env.unwrapped.device)  # Example position
+    home_quat = torch.tensor([ 0.0, 0.0, 0.0,  1.0], device=env.unwrapped.device)  # Z pointing to the side (rotation of 90deg around X) (xyzw)
     home_pose = torch.cat([home_pos, home_quat])  # Shape (7,)
-    reach_threshold = 0.03  # meters
 
+    skimmer_pos = torch.tensor([0.4, 0.4, 0.30], device=env.unwrapped.device)  # Example position
+    skimmer_quat = torch.tensor([ 0.0, 0.0, 0.0,  1.0], device=env.unwrapped.device)  # Z pointing to the side (rotation of 90deg around X) (xyzw)
+    skimmer_pose = torch.cat([skimmer_pos, skimmer_quat])  # Shape (7,)
+
+    reach_threshold = 0.03  # meters
 
     # Usually 'ee_pose', adjust if your command name is different
     command_name = "ee_pose"
@@ -165,24 +169,40 @@ def main():
         
         term = cmd_manager.get_term(command_name)
 
+        if term.time_left[0] <= 0.0:
+            set_time_left = False  # Reset flag if time is left
+
         if term.command_counter[0] % 2 == 0:
             cmd_buf = cmd_manager.get_command(command_name)
             cmd_buf[:] = home_pose          # broadcast to every parallel env
+            print("cmd_buf[0] =", cmd_buf[0])
             
             if set_time_left == False:
                 term.time_left[:] = home_timeout
                 set_time_left = True  # Set time_left only once
 
         else:
-            set_time_left = False  # Reset flag for next command
+            cmd_buf = cmd_manager.get_command(command_name)
+            cmd_buf[:] = skimmer_pose          # broadcast to every parallel env
+            print("cmd_buf[0] =", cmd_buf[0])
+            if set_time_left == False:
+                term.time_left[:] = home_timeout
+                set_time_left = True  # Set time_left only once
+        # else:
+        #     set_time_left = False  # Reset flag for next command
 
         print("term.time_left[0] =", term.time_left[0])
+        # print("cmd_manager.get_command(command_name) = ", cmd_manager.get_command(command_name)[0])
 
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
             # env stepping
             obs, _, _, _ = env.step(actions)
+
+            # print("actions[0] = ", actions[0])
+            # print("obs = ", obs[0])
+
 
         if args_cli.video:
             timestep += 1
