@@ -57,7 +57,8 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         ee_pose_cmd = "ee_pose"
         scene_entity_cfg = SceneEntityCfg("robot", body_names=eff_link)
 
-        self.episode_length_s = 1e9
+        # TEMP: For evaluating policy only
+        #self.episode_length_s = 1e9
 
         # 0. Set the scene spacing
         self.scene.env_spacing = 1.5 # Spacing between environments in the scene
