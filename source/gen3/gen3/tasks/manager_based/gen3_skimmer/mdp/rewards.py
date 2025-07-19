@@ -55,12 +55,16 @@ def get_z_axis(quat, effector: bool = True) -> torch.Tensor:
     
     return z_axis
 
-def end_effector_orientation_tracking_sin(
-    env: ManagerBasedRLEnv,
+def orientation_tracking_sin(
+    env: "ManagerBasedRLEnv",
     asset_cfg: SceneEntityCfg,
-    command_name: str
+    command_name: str,
+    distance_threshold: float = 0.2,  # default threshold, can be overridden
 ) -> torch.Tensor:
-    """Penalize the end-effector orientation deviation from Z pointing up using sin(theta) of the angle."""
+    """
+    Penalize the end-effector orientation deviation from Z pointing up using sin(theta) of the angle,
+    but only if the end-effector is within a distance threshold from the target. Otherwise, reward is zero.
+    """
     # Get the robot articulation
     robot: Articulation = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
@@ -70,65 +74,42 @@ def end_effector_orientation_tracking_sin(
     eff_z_axis = get_z_axis(eff_quat_w, effector=True)
 
     # Target Z
-    # obtain the desired and current orientations
     des_quat_b = command[:, 3:7]
-    # print("des_quat_b[0]:", des_quat_b[0])
-    
     des_quat_w = quat_mul(robot.data.root_quat_w, des_quat_b)
     target_z = get_z_axis(des_quat_w, effector=False)
 
     theta_deg = angle_between_vecs(eff_z_axis, target_z)
-    # # --- 5. Perform vector calculations ---
-    # v1 = eff_z_axis
-    # v2 = target_z
-    # norm_v1 = torch.linalg.norm(v1, dim=1)
-    # norm_v2 = torch.linalg.norm(v2, dim=1)
-    # product_of_norms = norm_v1 * norm_v2
-
-    # # Cross product for a batch of vectors
-    # cross_prod = torch.cross(v1, v2, dim=1)
-    # norm_cross_prod = torch.linalg.norm(cross_prod, dim=1)
-
-    # # Dot product for a batch of vectors (element-wise multiplication and sum)
-    # dot_prod = torch.sum(v1 * v2, dim=1)
-
-    # # --- 6. Calculate sine, cosine, and theta for the batch ---
-    # # Use a small epsilon to prevent division by zero for zero-length vectors
-    # epsilon = 1e-8
-    # sin_theta = norm_cross_prod / (product_of_norms + epsilon)
-    # # cos_theta = torch.clamp(dot_prod / (product_of_norms + epsilon), -1.0, 1.0)
-    
-    # theta_rad = torch.atan2(norm_cross_prod, dot_prod)
-    # theta_deg = torch.rad2deg(theta_rad)
-
-
-
-    
-
-    # Compute the cross product and its norm (sin(theta) = ||a x b|| / (||a||*||b||))
-    # cross = torch.cross(eff_z_axis, target_z.expand_as(eff_z_axis), dim=1)
-    # sin_theta = torch.norm(cross, dim=1) / (torch.norm(eff_z_axis, dim=1) * torch.norm(target_z))
-
-    # Print all variables for the first environment only
-    
-    
-    # print("eff_z_axis[0]:", eff_z_axis[0])
-    # print("cross_prod[0]:", cross_prod[0])
-    # print("sin_theta[0]:", sin_theta[0])
-    # Calculate theta (in radians) from sin_theta for the first environment
-    # print("theta_rad (radians):", theta_rad[0].item())
-    # print("theta_deg (degrees):", theta_deg[0].item())
 
     sin_theta = torch.sin(torch.deg2rad(theta_deg))  # Convert degrees to radians and compute sin(theta)
-
     reward = 1.0 - sin_theta  # Return sin(theta) as the reward
-    # print("Reward for the first environment:", reward[0].item())
-    # print("Reward shape:", reward.shape)
+
+    # --- Compute distance between end-effector and target ---
+    # Get end-effector position in world frame
+    eff_pos_w = robot.data.body_state_w[:, asset_cfg.body_ids[0], :3]  # (num_envs, 3)
+    # Get robot base pose
+    robot_pos_w = robot.data.root_state_w[:, :3]
+    robot_quat_w = robot.data.root_state_w[:, 3:7]
+    # Get target pose in robot base frame
+    target_pos_b = command[:, :3]
+    target_quat_b = command[:, 3:7]
+    # Convert target pose to world frame
+    target_pos_w, _ = combine_frame_transforms(
+        robot_pos_w,
+        robot_quat_w,
+        target_pos_b,
+        target_quat_b
+    )  # (num_envs, 3)
+    # Compute Euclidean distance
+    dist = torch.linalg.norm(eff_pos_w - target_pos_w, dim=1)  # (num_envs,)
+
+    # Only apply orientation penalty if within threshold, else reward is zero
+    mask = dist <= distance_threshold
+    reward = reward * mask.float()
 
     if torch.isnan(reward).any() or torch.isinf(reward).any():
-        raise RuntimeError("ERROR: NaN or Inf detected in end_effector_orientation_tracking_sin reward!")
+        raise RuntimeError("ERROR: NaN or Inf detected in orientation_tracking_sin reward!")
 
-    return reward 
+    return reward
 
 
 def end_effector_orientation_tracking_tanh(
@@ -139,11 +120,74 @@ def end_effector_orientation_tracking_tanh(
 ) -> torch.Tensor:
     """Penalize the end-effector orientation deviation from Z pointing up."""
 
-    reward = end_effector_orientation_tracking_sin(env, asset_cfg, command_name)
+    reward = orientation_tracking_sin(env, asset_cfg, command_name)
 
     return 1.0 - torch.tanh(reward / std)  # Normalize the reward with a tanh kernel
 
+def sphere_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    sphere_r: float = None,
+) -> torch.Tensor:
+    """Penalize the end-effector for being outside the target area."""
+    # Check that sphere_r is provided
+    if sphere_r is None or sphere_r < 1e-2: # min 1cm
+        raise ValueError("sphere_r must be provided and >= 1cm.")
 
+    ### 1. Get target and effector poses
+    
+    ## 1.1. Get robot articulation and command
+    robot: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    
+    ## Get robot pose
+    robot_pos_w = robot.data.root_state_w[:, :3]
+    robot_quat_w = robot.data.root_state_w[:, 3:7] # (w, x, y, z) format
+
+    ## 1.2. Get target pose
+    target_pos_b = command[:, :3] # (num_envs, 3)
+    target_quat_b = command[:, 3:7] # (num_envs, 4)
+
+    # Convert target pose to world frame
+    target_pos_w, target_quat_w = combine_frame_transforms(
+        robot_pos_w,
+        robot_quat_w,
+        target_pos_b,
+        target_quat_b
+    ) # (num_envs, 3)
+
+    ## 1.3. Get effector pose
+    # asset_cfg.body_ids[0] should be the index of the end-effector link
+    eff_pos_w = robot.data.body_state_w[:, asset_cfg.body_ids[0], :3] # (num_envs, 3) # type: ignore
+
+    rot = R.from_quat(target_quat_w.cpu().numpy())
+    offset = torch.tensor([0.0, 0.0, sphere_r])
+    offset_w = rot.apply(offset)
+    sphere_center_w = target_pos_w + torch.from_numpy(offset_w).to(target_pos_w.device).type(target_pos_w.dtype)
+
+    
+    ## 1.4. Calculate distance between effector and target
+    dist_eff_to_sphere_center = torch.norm(eff_pos_w - sphere_center_w, dim=1)  # (num_envs,)
+    # print("dist_eff_to_sphere_center = ", dist_eff_to_sphere_center)
+    # print("dist_eff_to_sphere_center.shape = ", dist_eff_to_sphere_center.shape)
+    
+    ## 1.5. Calculate penalty
+    penalty = torch.minimum((dist_eff_to_sphere_center - sphere_r) / sphere_r, torch.zeros_like(dist_eff_to_sphere_center))
+    
+    # print("sphere penalty = ", penalty)
+    # print("sphere penalty.shape = ", penalty.shape)
+    
+    ## 1.6. Check for NaNs
+    if torch.isnan(penalty).any() or torch.isinf(penalty).any():
+        raise RuntimeError("ERROR: NaN or Inf detected in sphere penalty!")
+    
+    ## 1.7. Check for unwanted shape (should be 1D: (num_envs,))
+    
+    ## 1.6. Return penalty
+    return penalty
+    
+    
 
 def cone_penalty(env: ManagerBasedRLEnv,
         asset_cfg: SceneEntityCfg,

@@ -16,8 +16,6 @@ from isaaclab.managers import TerminationTermCfg
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.managers import RewardTermCfg as RewTerm
-# from isaaclab.scene import RigidObjectCfg, InitialStateCfg, UsdPropertiesCfg
-# from isaaclab.sim.spawners.materials.materials_cfg import VisualMaterialCfg # For visual appearance
 
 ##
 # Pre-defined configs
@@ -57,9 +55,6 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         ee_pose_cmd = "ee_pose"
         scene_entity_cfg = SceneEntityCfg("robot", body_names=eff_link)
 
-        # TEMP: For evaluating policy only
-        #self.episode_length_s = 1e9
-
         # 0. Set the scene spacing
         self.scene.env_spacing = 1.5 # Spacing between environments in the scene
         
@@ -67,11 +62,7 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         self.scene.robot = KINOVA_GEN3_N7_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.table.spawn.usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/ThorlabsTable/table_instanceable.usd"
         self.scene.table.init_state.pos = (0.0, 0.0, 0.0)
-        self.scene.table.init_state.rot = (0.0, 0.0, 0.0, 1.0) # wxyz
-        
-        # Config for f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd"
-        #self.scene.table.init_state.pos = (-0.6, 0.0, 0.0)
-        #self.scene.table.init_state.rot = (0.70711, 0.0, 0.0, -0.70711) # wxyz        
+        self.scene.table.init_state.rot = (0.0, 0.0, 0.0, 1.0) # wxyz 
         
         # 2. Override events
         self.events.reset_robot_joints.params["position_range"] = (0.75, 1.25)
@@ -80,7 +71,6 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # 3.1. Fill in the body names for end-effector tracking
         self.rewards.end_effector_position_tracking.params["asset_cfg"].body_names = [eff_link]
         self.rewards.end_effector_position_tracking_fine_grained.params["asset_cfg"].body_names = [eff_link]
-
 
         # self.rewards.end_effector_orientation_tracking_fine_grained = RewTerm(
         #     func=mdp_skimmer.end_effector_orientation_tracking_tanh,
@@ -93,26 +83,37 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # )
         #self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = [eff_link]
         
-        # Increase the weight of end-effector position tracking
+        # Cone and sphere penalty params
+        sphere_penalty_r = 0.15 # 10cm
+        cone_penalty_h = 0.20 * 5 # 20cm
+        cone_penalty_r = 0.10 * 5 # 10cm
+
+        ## Orientation tracking params
+        orientation_tracking_sin_weight = -0.2 # negative
+        orientation_tracking_sin_dist_thresh = 0.15 # 15cm
+
+        ## Position tracking params
         self.rewards.end_effector_position_tracking.weight = -0.8 # negative
-        weight_end_effector_orientation_tracking_sin = -0.1 # negative
         self.rewards.end_effector_position_tracking_fine_grained.weight = 1e-5 #0.4 # positive !
-        self.rewards.action_rate.weight = -0.0005 # negative
-        self.rewards.joint_vel.weight = -0.0005 # negative
+        
+        # Action rate params
+        self.rewards.action_rate.weight = -0.005 # negative
+        
+        # Joint velocity params
+        self.rewards.joint_vel.weight = -0.005 # negative
 
         self.rewards.end_effector_orientation_tracking = RewardTermCfg(
-            func=mdp_skimmer.end_effector_orientation_tracking_sin,
-            weight=weight_end_effector_orientation_tracking_sin,  # negative
+            func=mdp_skimmer.orientation_tracking_sin,
+            weight=orientation_tracking_sin_weight,  # negative
             params={
                 "asset_cfg": scene_entity_cfg,
                 "command_name": ee_pose_cmd,
+                "distance_threshold": orientation_tracking_sin_dist_thresh,
             }
         )
 
         # 3.2. Add cone penalty for collision avoidance
-        # This means that at `cone_h` height from the target, the cone base has radius `cone_r`
-        cone_h = 0.20 * 5 # 20cm
-        cone_r = 0.10 * 5 # 10cm
+
 
         self.rewards.cone_penalty = RewardTermCfg(
             func=mdp_skimmer.cone_penalty,
@@ -120,10 +121,21 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
             params={
                 "asset_cfg": scene_entity_cfg,
                 "command_name": ee_pose_cmd,
-                "cone_h": cone_h,
-                "cone_r": cone_r,
+                "cone_h": cone_penalty_h,
+                "cone_r": cone_penalty_r,
                 "delta_r": 1.0,
                 "delta_h": 1.0,
+            }
+        )
+
+        # 3.3. Add sphere penalty for collision avoidance
+        self.rewards.sphere_penalty = RewardTermCfg(
+            func=mdp_skimmer.sphere_penalty,
+            weight=1, # positive
+            params={
+                "asset_cfg": scene_entity_cfg,
+                "command_name": ee_pose_cmd,
+                "sphere_r": sphere_penalty_r,
             }
         )
 
@@ -166,34 +178,8 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         #     }
         # )
         
-
-        # # Add a visualization cone to the scene
-        # # The USD Cone primitive has its origin at the center of its base.
-        # # We'll place this base at a fixed position for visualization.
-        # self.scene.penalty_cone_visualizer = RigidObjectCfg(
-        #     prim_path="{ENV_REGEX_NS}/PenaltyConeVisual", # Unique prim path
-        #     prim_type="Cone", # Specify the primitive type
-        #     init_state=InitialStateCfg(
-        #         pos=(0.5, 0.0, 0.0),  # Position of the cone's base center in world frame (e.g., in front of robot)
-        #         rot=(1.0, 0.0, 0.0, 0.0)  # Orientation (w,x,y,z quaternion), identity for now
-        #     ),
-        #     usd_props=UsdPropertiesCfg(
-        #         prop_double={
-        #             "height": cone_h, # Height of the cone
-        #             "radius": cone_r, # Radius of the cone's base
-        #         },
-        #         prop_token={
-        #             "axis": "Z"  # Cone extends along its local Z-axis
-        #         }
-        #     ),
-        #     visual_material=VisualMaterialCfg(
-        #         prim_path="{ENV_REGEX_NS}/PenaltyConeVisual/Looks/Material", # Path for the new material
-        #         diffuse_color=(0.0, 0.8, 0.0),  # Green color
-        #         opacity=0.4  # Semi-transparent
-        #     ),
-        #     collision=False, # No collision for visualization
-        #     physics_material=None # No physics properties
-        # )
+        # Note: Cone visualization will be handled dynamically in the environment
+        # to follow the target position for each environment
 
         # 4. Override actions
         self.actions.arm_action = mdp.JointPositionActionCfg(
