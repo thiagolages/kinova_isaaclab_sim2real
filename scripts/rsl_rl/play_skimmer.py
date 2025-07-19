@@ -36,14 +36,17 @@ parser.add_argument("--video_length", type=int, default=200, help="Length of the
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--num_envs", type=int, default=2, help="Number of environments to simulate.")
+parser.add_argument("--task", type=str, default="Gen3-Skimmer-v0", help="Name of the task.")
 parser.add_argument(
     "--use_pretrained_checkpoint",
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--plot-trajectories", action="store_true", default=False, help="Plot end-effector trajectories.")
+parser.add_argument("--save-trajectory", action="store_true", default=False, help="Save trajectory data to file.")
+
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -63,6 +66,7 @@ import gymnasium as gym
 import os
 import time
 import torch
+import numpy as np
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -77,6 +81,13 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 
 import gen3.tasks  # noqa: F401
+
+# Import trajectory plotting functions
+from gen3.tasks.manager_based.gen3_skimmer.mdp.plot_trajectory import (
+    plot_trajectory_with_cone,
+    plot_3d_trajectory_with_cone,
+    analyze_trajectory_cone_penalty
+)
 
 
 def main():
@@ -102,6 +113,8 @@ def main():
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     log_dir = os.path.dirname(resume_path)
+
+    print(f"[INFO] Log directory: {log_dir}")
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -140,7 +153,8 @@ def main():
         ppo_runner.alg.policy, normalizer=ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
     )
 
-    dt = env.unwrapped.physics_dt
+    # TEMPORARY TO SLOW DOWN THE SIMULATION
+    dt = env.unwrapped.physics_dt * 5
 
     # reset environment
     obs, _ = env.get_observations()
@@ -162,6 +176,21 @@ def main():
 
     home_timeout = 5 # seconds to reach home
     set_time_left = False  # Flag to check if time_left is set
+    
+    # Initialize trajectory recording
+    trajectory_data = []
+    end_effector_positions = []
+    target_positions = []
+    target_orientations = []
+
+    # Get cone parameters from environment config
+    cone_h = 0.20 * 3 #* 5  # 20cm * 5 = 1.0m
+    cone_r = 0.10 * 5 # 10cm * 5 = 0.5m
+    plot_traj = False
+    target_changed = False
+    old_cmd_buf = None
+    count = 0
+
     # simulate environment
     while simulation_app.is_running():
         
@@ -173,25 +202,41 @@ def main():
             set_time_left = False  # Reset flag if time is left
 
         if term.command_counter[0] % 2 == 0:
+            plot_traj = False
             cmd_buf = cmd_manager.get_command(command_name)
             cmd_buf[:] = home_pose          # broadcast to every parallel env
-            print("cmd_buf[0] =", cmd_buf[0])
+            # print("cmd_buf[0] =", cmd_buf[0])
             
             if set_time_left == False:
                 term.time_left[:] = home_timeout
                 set_time_left = True  # Set time_left only once
 
         else:
+            plot_traj = True
             cmd_buf = cmd_manager.get_command(command_name)
             cmd_buf[:] = skimmer_pose          # broadcast to every parallel env
-            print("cmd_buf[0] =", cmd_buf[0])
+            # print("cmd_buf[0] =", cmd_buf[0])
             if set_time_left == False:
                 term.time_left[:] = home_timeout
                 set_time_left = True  # Set time_left only once
         # else:
         #     set_time_left = False  # Reset flag for next command
 
-        print("term.time_left[0] =", term.time_left[0])
+        # print(f"old_cmd_buf = {old_cmd_buf}")
+        # print(f"cmd_buf[0] = {cmd_buf[0]}")
+
+        # if old_cmd_buf is not None:
+        #     print(f"torch.allclose(old_cmd_buf, cmd_buf[0]) = {torch.allclose(old_cmd_buf, cmd_buf[0])}")
+        # else:
+        #     print(f"old_cmd_buf is None")
+
+        if old_cmd_buf is not None and not torch.allclose(old_cmd_buf, cmd_buf[0]):
+            target_changed = True
+            print(f"[INFO] Target changed at timestep {count}!")
+        
+        old_cmd_buf = cmd_buf[0].clone()
+
+        # print("term.time_left[0] =", term.time_left[0])
         # print("cmd_manager.get_command(command_name) = ", cmd_manager.get_command(command_name)[0])
 
         with torch.inference_mode():
@@ -200,9 +245,133 @@ def main():
             # env stepping
             obs, _, _, _ = env.step(actions)
 
+            # Record trajectory data if enabled
+            if args_cli.plot_trajectories or args_cli.save_trajectory and \
+                plot_traj:
+                
+                # Get end-effector position (assuming it's in the observations)
+                # This might need adjustment based on your observation space
+                robot = env.unwrapped.scene["robot"]
+                eff_link_id = robot.body_names.index("end_effector_link")
+                world_ee_pos = robot.data.body_state_w[0, eff_link_id, :3]
+                # Get end-effector position with respect to the base
+                base_link_id = robot.body_names.index("base_link")
+                base_link_pos = robot.data.body_state_w[0, base_link_id, :3]
+                ee_pos = world_ee_pos - base_link_pos
+                
+                # Get end-effector position with respect to the target
+                # (0, 0) means the end-effector is at the target position
+                # ee_pos = ee_pos_abs - cmd_buf[0, :3]
+                
+                # Get current target position
+                if not target_changed:
+                    current_target_pos = cmd_buf[0, :3]
+                    current_target_quat = cmd_buf[0, 3:7]
+                
+                end_effector_positions.append(ee_pos.cpu().numpy())
+                target_positions.append(current_target_pos.cpu().numpy())
+                target_orientations.append(current_target_quat.cpu().numpy())
+
+                print("#######################")
+                print(f"world_ee_pos    = {world_ee_pos}")
+                print(f"base_link_pos   = {base_link_pos}")
+                # print(f"ee_pos_abs      = {ee_pos_abs}")
+                print(f"cmd_buf[0, :3]  = {cmd_buf[0, :3]}")
+                print(f"ee_pos          = {ee_pos}")
+                print(f"ee_pos          = {ee_pos}")
+                print(f"len(end_effector_positions)  = {len(end_effector_positions)}")
+                print(f"len(target_positions)        = {len(target_positions)}")
+                print(f"len(target_orientations)     = {len(target_orientations)}")
+            
+                # Plot trajectories if enabled
+                if target_changed and \
+                    len(end_effector_positions) > 0:
+                    
+                    count += 1
+                    print(f"[INFO] Plotting end-effector trajectories #{count}...")
+                    
+                    # Convert to tensors
+                    ee_positions_tensor = torch.tensor(np.array(end_effector_positions))
+                    target_pos_tensor = torch.tensor(np.array(target_positions[-1]))  # Use last target
+                    target_quat_tensor = torch.tensor(np.array(target_orientations[-1]))  # Use last target
+
+                    # INSERT_YOUR_CODE
+                    print(f"ee_positions_tensor shape: {ee_positions_tensor.shape}")
+                    print(f"target_pos_tensor shape: {target_pos_tensor.shape}")
+                    print(f"target_quat_tensor shape: {target_quat_tensor.shape}")
+                    
+                    # Create plots directory
+                    plots_dir = os.path.join(log_dir, "trajectory_plots")
+                    os.makedirs(plots_dir, exist_ok=True)
+                    
+                    # Plot 2D projections
+                    plot_trajectory_with_cone(
+                        ee_positions_tensor, target_pos_tensor, target_quat_tensor,
+                        cone_r, cone_h, 
+                        save_path=os.path.join(plots_dir, f"{count}_trajectory_2d.png"),
+                        show_plot=False
+                    )
+                    
+                    # Plot 3D trajectory
+                    plot_3d_trajectory_with_cone(
+                        ee_positions_tensor, target_pos_tensor, target_quat_tensor,
+                        cone_r, cone_h,
+                        save_path=os.path.join(plots_dir, f"{count}_trajectory_3d.png"),
+                        show_plot=False
+                    )
+                    
+                    # Analyze trajectory
+                    analysis = analyze_trajectory_cone_penalty(
+                        ee_positions_tensor, target_pos_tensor, target_quat_tensor,
+                        cone_r, cone_h
+                    )
+                    
+                    print("\nTrajectory Analysis:")
+                    print(f"Total steps: {analysis['total_steps']}")
+                    print(f"Steps inside cone: {analysis['steps_inside_cone']}")
+                    print(f"Percentage inside cone: {analysis['percentage_inside_cone']:.2f}%")
+                    print(f"Average distance to boundary: {analysis['avg_distance_to_boundary']:.4f}")
+                    
+                    # Save analysis to file
+                    analysis_file = os.path.join(plots_dir, f"{count}_trajectory_analysis.txt")
+                    with open(analysis_file, 'w') as f:
+                        f.write("Trajectory Analysis\n")
+                        f.write("==================\n")
+                        f.write(f"Total steps: {analysis['total_steps']}\n")
+                        f.write(f"Steps inside cone: {analysis['steps_inside_cone']}\n")
+                        f.write(f"Percentage inside cone: {analysis['percentage_inside_cone']:.2f}%\n")
+                        f.write(f"Average distance to boundary: {analysis['avg_distance_to_boundary']:.4f}\n")
+                    
+                    print(f"Analysis saved to {analysis_file}")
+                
+                # Save trajectory data if enabled
+                if args_cli.save_trajectory and \
+                    target_changed and \
+                    len(end_effector_positions) > 0:
+                    
+                    print("[INFO] Saving trajectory data...")
+                    
+                    trajectory_file = os.path.join(log_dir, f"{count}_trajectory_data.npz")
+                    np.savez(
+                        trajectory_file,
+                        end_effector_positions=np.array(end_effector_positions),
+                        target_positions=np.array(target_positions),
+                        target_orientations=np.array(target_orientations),
+                        cone_radius=cone_r,
+                        cone_height=cone_h
+                    )
+                    print(f"Trajectory data saved to {trajectory_file}")
+
+                if target_changed:
+                    target_changed = False
+                    # Reset trajectory recording'
+                    end_effector_positions = []
+                    target_positions = []
+                    target_orientations = []
+                
+
             # print("actions[0] = ", actions[0])
             # print("obs = ", obs[0])
-
 
         if args_cli.video:
             timestep += 1

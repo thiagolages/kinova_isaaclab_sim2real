@@ -43,6 +43,10 @@ parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy 
 parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
+parser.add_argument("--plot_trajectories", action="store_true", default=False, help="Plot end-effector trajectories.")
+parser.add_argument("--trajectory_interval", type=int, default=1000, help="Interval between trajectory plots (in iterations).")
+parser.add_argument("--enable_cone_visualization", action="store_true", default=False, help="Enable dynamic cone visualization.")
+
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -65,6 +69,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import os
 import torch
+import numpy as np
 from datetime import datetime
 
 from rsl_rl.runners import OnPolicyRunner
@@ -86,6 +91,16 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import gen3.tasks  # noqa: F401
+
+# Import trajectory plotting functions
+from gen3.tasks.manager_based.gen3_skimmer.mdp.plot_trajectory import (
+    plot_trajectory_with_cone,
+    plot_3d_trajectory_with_cone,
+    analyze_trajectory_cone_penalty
+)
+
+# Import cone visualizer
+from gen3.tasks.manager_based.gen3_skimmer.mdp.cone_visualizer import create_cone_visualizer
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -122,11 +137,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs: {time-stamp}_{run_name}
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    
     # This way, the Ray Tune workflow can extract experiment name.
     if agent_cfg.run_name:
-        log_dir += f"_{agent_cfg.run_name}"
+        log_dir = f"{agent_cfg.run_name}_"
+    else:
+        log_dir = ""
+    
+    # Avoids running different experiments with the same name
+    if os.path.exists(os.path.join(log_root_path, log_dir)):
+        print(f"[ERROR] Log directory already exists: {os.path.join(log_root_path, log_dir)}")
+        exit(1)
+    
+    # specify directory for logging runs: {time-stamp}_{run_name}
+    log_dir += datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
     log_dir = os.path.join(log_root_path, log_dir)
     print(f"Exact experiment name requested from command line: {log_dir}")
 
@@ -156,6 +181,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
+    # Initialize cone visualizer if enabled
+    cone_visualizer = None
+    if args_cli.enable_cone_visualization:
+        print("[INFO] Initializing cone visualizer...")
+        # Get cone parameters from environment config
+        cone_h = 0.20 * 5  # 20cm * 5 = 1.0m
+        cone_r = 0.10 * 5  # 10cm * 5 = 0.5m
+        cone_visualizer = create_cone_visualizer(env.unwrapped, cone_r, cone_h)
+        print(f"[INFO] Created cone visualizer for {env.unwrapped.num_envs} environments")
+
+    # Initialize trajectory recording if enabled
+    trajectory_data = []
+    if args_cli.plot_trajectories:
+        print("[INFO] Trajectory plotting enabled.")
+        # Create trajectory plots directory
+        trajectory_dir = os.path.join(log_dir, "trajectories")
+        os.makedirs(trajectory_dir, exist_ok=True)
+
     # create runner from rsl-rl
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     # write git state to logs
@@ -172,8 +215,129 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
 
-    # run training
-    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    # Custom training loop with trajectory recording and cone visualization
+    def custom_learn(num_learning_iterations: int, init_at_random_ep_len: bool = True):
+        """Custom learning function with trajectory recording and cone visualization."""
+        
+        # Initialize trajectory recording variables
+        current_trajectory = {
+            'end_effector_positions': [],
+            'target_positions': [],
+            'target_orientations': [],
+            'iteration': 0
+        }
+        
+        # Get cone parameters
+        cone_h = 0.20 * 5  # 20cm * 5 = 1.0m
+        cone_r = 0.10 * 5  # 10cm * 5 = 0.5m
+        
+        for iteration in range(num_learning_iterations):
+            # Run one iteration of training
+            runner.learn(num_learning_iterations=1, init_at_random_ep_len=init_at_random_ep_len)
+            
+            # Update cone visualization if enabled
+            if cone_visualizer is not None:
+                try:
+                    # Get current target positions from the environment
+                    command_manager = env.unwrapped.command_manager
+                    command_name = "ee_pose"
+                    command = command_manager.get_command(command_name)
+                    
+                    # Extract target positions and orientations
+                    target_positions = command[:, :3]  # (num_envs, 3)
+                    target_orientations = command[:, 3:7]  # (num_envs, 4)
+                    
+                    # Update cone positions
+                    cone_visualizer.update_cones(target_positions, target_orientations)
+                    
+                except Exception as e:
+                    print(f"[WARNING] Failed to update cone visualization: {e}")
+            
+            # Record trajectory data if enabled
+            if args_cli.plot_trajectories and iteration % args_cli.trajectory_interval == 0:
+                try:
+                    # Get end-effector positions for all environments
+                    robot = env.unwrapped.scene["robot"]
+                    eff_link_id = robot.body_names.index("end_effector_link")
+                    ee_positions = robot.data.body_state_w[:, eff_link_id, :3]  # (num_envs, 3)
+                    
+                    # Get target positions
+                    command_manager = env.unwrapped.command_manager
+                    command_name = "ee_pose"
+                    command = command_manager.get_command(command_name)
+                    target_positions = command[:, :3]  # (num_envs, 3)
+                    target_orientations = command[:, 3:7]  # (num_envs, 4)
+                    
+                    # Record trajectory for first environment (for visualization)
+                    current_trajectory['end_effector_positions'].append(ee_positions[0].cpu().numpy())
+                    current_trajectory['target_positions'].append(target_positions[0].cpu().numpy())
+                    current_trajectory['target_orientations'].append(target_orientations[0].cpu().numpy())
+                    current_trajectory['iteration'] = iteration
+                    
+                    # Create plots if we have enough data
+                    if len(current_trajectory['end_effector_positions']) >= 50:  # Minimum trajectory length
+                        print(f"[INFO] Creating trajectory plots for iteration {iteration}...")
+                        
+                        # Convert to tensors
+                        ee_positions_tensor = torch.tensor(np.array(current_trajectory['end_effector_positions']))
+                        target_pos_tensor = torch.tensor(np.array(current_trajectory['target_positions'][-1]))  # Use last target
+                        target_quat_tensor = torch.tensor(np.array(current_trajectory['target_orientations'][-1]))  # Use last target
+                        
+                        # Create plots
+                        plot_trajectory_with_cone(
+                            ee_positions_tensor, target_pos_tensor, target_quat_tensor,
+                            cone_r, cone_h, 
+                            save_path=os.path.join(trajectory_dir, f"trajectory_2d_iter_{iteration}.png"),
+                            show_plot=False
+                        )
+                        
+                        plot_3d_trajectory_with_cone(
+                            ee_positions_tensor, target_pos_tensor, target_quat_tensor,
+                            cone_r, cone_h,
+                            save_path=os.path.join(trajectory_dir, f"trajectory_3d_iter_{iteration}.png"),
+                            show_plot=False
+                        )
+                        
+                        # Analyze trajectory
+                        analysis = analyze_trajectory_cone_penalty(
+                            ee_positions_tensor, target_pos_tensor, target_quat_tensor,
+                            cone_r, cone_h
+                        )
+                        
+                        # Save analysis
+                        analysis_file = os.path.join(trajectory_dir, f"trajectory_analysis_iter_{iteration}.txt")
+                        with open(analysis_file, 'w') as f:
+                            f.write(f"Trajectory Analysis for Iteration {iteration}\n")
+                            f.write("=" * 50 + "\n")
+                            f.write(f"Total steps: {analysis['total_steps']}\n")
+                            f.write(f"Steps inside cone: {analysis['steps_inside_cone']}\n")
+                            f.write(f"Percentage inside cone: {analysis['percentage_inside_cone']:.2f}%\n")
+                            f.write(f"Average distance to boundary: {analysis['avg_distance_to_boundary']:.4f}\n")
+                        
+                        print(f"[INFO] Trajectory analysis saved to {analysis_file}")
+                        
+                        # Reset trajectory data for next recording
+                        current_trajectory = {
+                            'end_effector_positions': [],
+                            'target_positions': [],
+                            'target_orientations': [],
+                            'iteration': iteration
+                        }
+                        
+                except Exception as e:
+                    print(f"[WARNING] Failed to record trajectory data: {e}")
+        
+        # Cleanup cone visualizer
+        if cone_visualizer is not None:
+            cone_visualizer.cleanup()
+
+    # run training with custom learning function
+    if args_cli.plot_trajectories or args_cli.enable_cone_visualization:
+        print("[INFO] Using custom training loop with visualization features.")
+        custom_learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    else:
+        # Use standard training
+        runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
 
     # close the simulator
     env.close()
