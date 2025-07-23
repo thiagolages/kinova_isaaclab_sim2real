@@ -4,7 +4,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import torch
-import math
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
@@ -12,11 +11,6 @@ try:
     matplotlib.use('TkAgg') # Or 'Qt5Agg', 'GTK3Agg', etc.
 except ImportError:
     print("Warning: TkAgg backend not available. Plot might not show.")
-
-from mpl_toolkits.mplot3d import Axes3D
-from matplotlib.colors import LinearSegmentedColormap, Normalize
-from scipy.spatial.transform import Rotation
-
 
 def plot_trajectory_with_cone(
     end_effector_positions: torch.Tensor,  # Shape: (num_steps, 3) - x, y, z positions

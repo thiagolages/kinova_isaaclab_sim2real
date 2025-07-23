@@ -12,23 +12,23 @@ import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
 import gen3.tasks.manager_based.gen3_skimmer.mdp as mdp_skimmer
 from isaaclab_tasks.manager_based.manipulation.reach.reach_env_cfg import ReachEnvCfg
 from isaaclab.managers import RewardTermCfg
-from isaaclab.managers import TerminationTermCfg
-from isaaclab.managers import SceneEntityCfg
-from isaaclab.markers.config import FRAME_MARKER_CFG
-from isaaclab.managers import RewardTermCfg as RewTerm
+import isaaclab.sim as sim_utils
+from isaaclab.assets import RigidObjectCfg
 
 ##
 # Pre-defined configs
 ##
 from isaaclab_assets import KINOVA_GEN3_N7_CFG  # isort: skip
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-
-
+from isaaclab.managers import SceneEntityCfg
+from gen3.tasks.manager_based.gen3_skimmer.robots.kinova_custom import THIAGO_KINOVA_GEN3_N7_CFG
 ##
 # Environment configuration
 ##
 
 from isaaclab.envs import ManagerBasedRLEnv
+
+SKIMMER_USD_PATH = "/workspace/research/assets/usd/skimmer.usd"
     
 def check_singularity(
     env: ManagerBasedRLEnv,
@@ -57,14 +57,47 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
 
         # 0. Set the scene spacing
         self.scene.env_spacing = 1.5 # Spacing between environments in the scene
+        # Get ASSETS_PATH from environment variable or set default
         
         # 1. Switch robot to Kinova Gen3 N7
-        self.scene.robot = KINOVA_GEN3_N7_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        # self.scene.robot = KINOVA_GEN3_N7_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot = THIAGO_KINOVA_GEN3_N7_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        
+        print(f"THIAGO_KINOVA_GEN3_N7_CFG: {THIAGO_KINOVA_GEN3_N7_CFG}")
+        print(f"self.scene.robot: {self.scene.robot}")
+
         self.scene.table.spawn.usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/ThorlabsTable/table_instanceable.usd"
         self.scene.table.init_state.pos = (0.0, 0.0, 0.0)
         self.scene.table.init_state.rot = (0.0, 0.0, 0.0, 1.0) # wxyz 
+
+        # ------------------------------------------------------------------
+        # 2.a Add the skimmer *tool* mesh under the gripper link
+        #     We create it as a kinematic rigid object so that physics is not
+        #     affected, but the visual is updated every frame automatically by
+        #     USD because it is a child prim of the link.  The tool frame is
+        #     rotated +90° about Y so that its Z-axis points *forward* in the
+        #     gripper frame; the gripper itself is oriented such that its X is
+        #     forward, therefore we apply the offset quaternion
+        #     q_off = [cos(π/4), 0, sin(π/4), 0].  This matches the transform
+        #     assumption used in the reward function changes.
+        # ------------------------------------------------------------------
+
+        # self.scene.tool = RigidObjectCfg(
+        #     prim_path="{ENV_REGEX_NS}/Robot/end_effector_link/skimmer_tool",
+        #     spawn=sim_utils.UsdFileCfg(
+        #         usd_path=SKIMMER_USD_PATH,
+        #         scale=(1.0, 1.0, 1.0),
+        #         visual_material=sim_utils.PreviewSurfaceCfg(opacity=1.0),
+        #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+        #         collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+        #     ),
+        #     init_state=RigidObjectCfg.InitialStateCfg(
+        #         pos=(0.0, 0.0, 0.0),
+        #         rot=(0.70710678, 0.0, 0.70710678, 0.0),  # +90° about Y
+        #     ),
+        # )
         
-        # 2. Override events
+        # 2.b Override events
         self.events.reset_robot_joints.params["position_range"] = (0.75, 1.25)
         
         # 3. Override rewards

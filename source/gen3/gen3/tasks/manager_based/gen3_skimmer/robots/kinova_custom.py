@@ -1,12 +1,15 @@
+import os
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
+ASSETS_PATH = os.environ.get("ASSETS_PATH", "/workspace/research/assets")
+
 """Configuration of Kinova Gen3 (7-Dof) arm with an attached Strainer."""
 THIAGO_KINOVA_GEN3_N7_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"robots/thiago_gen3n7.usd",
+        usd_path=f"{ASSETS_PATH}/usd/robot.usd",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=5.0,

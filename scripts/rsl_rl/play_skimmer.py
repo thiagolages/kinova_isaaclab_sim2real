@@ -197,13 +197,13 @@ def main():
         start_time = time.time()
         
         term = cmd_manager.get_term(command_name)
+        cmd_buf = cmd_manager.get_command(command_name)
 
         if term.time_left[0] <= 0.0:
             set_time_left = False  # Reset flag if time is left
 
         if term.command_counter[0] % 2 == 0:
             plot_traj = False
-            cmd_buf = cmd_manager.get_command(command_name)
             cmd_buf[:] = home_pose          # broadcast to every parallel env
             # print("cmd_buf[0] =", cmd_buf[0])
             
@@ -211,14 +211,23 @@ def main():
                 term.time_left[:] = home_timeout
                 set_time_left = True  # Set time_left only once
 
+        # DO NOT ENFORCE SPECIFIC POSE
         else:
-            plot_traj = True
-            cmd_buf = cmd_manager.get_command(command_name)
-            cmd_buf[:] = skimmer_pose          # broadcast to every parallel env
-            # print("cmd_buf[0] =", cmd_buf[0])
-            if set_time_left == False:
-                term.time_left[:] = home_timeout
-                set_time_left = True  # Set time_left only once
+            # always keep the skimmer at a height of 0.30m or lower
+            for i in range(args_cli.num_envs):
+                if cmd_buf[i, 2] > 0.30:
+                    cmd_buf[i, 2] = float(torch.empty(1).uniform_(0.1, 0.3).item())
+
+        # else:
+        #     plot_traj = True
+        #     cmd_buf = cmd_manager.get_command(command_name)
+        #     cmd_buf[:] = skimmer_pose          # broadcast to every parallel env
+        #     # print("cmd_buf[0] =", cmd_buf[0])
+        #     if set_time_left == False:
+        #         term.time_left[:] = home_timeout
+        #         set_time_left = True  # Set time_left only once
+        
+        
         # else:
         #     set_time_left = False  # Reset flag for next command
 
