@@ -2,6 +2,8 @@ import pytest
 import torch
 from scipy.spatial.transform import Rotation as R
 import numpy as np
+from unittest.mock import MagicMock
+from . import rewards
 
 @torch.jit.script
 def quat_apply(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
@@ -234,3 +236,52 @@ def test_dist_eff_to_target_z_axis_invalid_shapes():
     eff_pos = torch.tensor([0.0, 0.0])  # Invalid shape
     with pytest.raises(ValueError):
         dist_eff_to_target_z_axis(eff_pos, (target_pos, target_quat))
+
+class DummyRobotData:
+    def __init__(self, eff_pos, root_state, body_state, root_quat):
+        self.body_state_w = body_state  # (num_envs, num_bodies, 7)
+        self.root_state_w = root_state  # (num_envs, 7)
+        self.root_quat_w = root_quat    # (num_envs, 4)
+
+class DummyRobot:
+    def __init__(self, eff_pos, root_state, body_state, root_quat):
+        self.data = DummyRobotData(eff_pos, root_state, body_state, root_quat)
+
+class DummyCommandManager:
+    def __init__(self, command):
+        self._command = command
+    def get_command(self, name):
+        return self._command
+
+class DummyEnv:
+    def __init__(self, eff_pos, root_state, body_state, root_quat, command):
+        self.scene = {'robot': DummyRobot(eff_pos, root_state, body_state, root_quat)}
+        self.command_manager = DummyCommandManager(command)
+
+class DummyAssetCfg:
+    def __init__(self, name, body_ids):
+        self.name = name
+        self.body_ids = body_ids
+
+@pytest.mark.parametrize("eff_pos, sphere_center, sphere_r, plane_h_percentage, expected", [
+    # eff_pos, sphere_center, sphere_r, plane_h_percentage, expected termination (True/False)
+    (torch.tensor([[0.0, 0.0, 1.0]]), torch.tensor([[0.0, 0.0, 0.0]]), 1.0, 0.5, torch.tensor([True])),
+    (torch.tensor([[0.0, 0.0, 2.0]]), torch.tensor([[0.0, 0.0, 0.0]]), 1.0, 0.5, torch.tensor([False])),
+])
+def test_collision_from_top(eff_pos, sphere_center, sphere_r, plane_h_percentage, expected):
+    # Setup dummy tensors for robot and command
+    num_envs = eff_pos.shape[0]
+    # root_state_w: (num_envs, 7) (pos + quat)
+    root_state = torch.cat([sphere_center, torch.tensor([[1.0, 0.0, 0.0, 0.0]])], dim=1)
+    # body_state_w: (num_envs, num_bodies, 7) (pos + quat)
+    body_state = torch.zeros((num_envs, 1, 7))
+    body_state[:, 0, :3] = eff_pos
+    body_state[:, 0, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    # root_quat_w: (num_envs, 4)
+    root_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    # command: (num_envs, 7) (target_pos_b + target_quat_b)
+    command = torch.cat([torch.zeros((num_envs, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]])], dim=1)
+    env = DummyEnv(eff_pos, root_state, body_state, root_quat, command)
+    asset_cfg = DummyAssetCfg('robot', [0])
+    result = rewards.collision_from_top(env, asset_cfg, 'dummy', sphere_r=sphere_r, plane_h_percentage=plane_h_percentage)
+    assert torch.equal(result, expected)

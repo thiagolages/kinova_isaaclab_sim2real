@@ -14,6 +14,10 @@ from isaaclab_tasks.manager_based.manipulation.reach.reach_env_cfg import ReachE
 from isaaclab.managers import RewardTermCfg
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
+from isaaclab.managers import TerminationTermCfg
+from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg, OffsetCfg
 
 ##
 # Pre-defined configs
@@ -41,7 +45,7 @@ def check_singularity(
     """
     # Compute manipulability for all envs
     reward = mdp_skimmer.manipulability_reward(env, asset_cfg, eff_name)  # (num_envs,)
-    # Find envs where manipulability is below threshold
+    # Find envs where manipulability is below wthreshold
     done_mask = reward < threshold
     return done_mask
 
@@ -51,7 +55,7 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # post init of parent
         super().__post_init__()
 
-        eff_link = "end_effector_link"
+        eff_link = "end_effector_link" #"skimmer_tool"
         ee_pose_cmd = "ee_pose"
         scene_entity_cfg = SceneEntityCfg("robot", body_names=eff_link)
 
@@ -116,32 +120,51 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # )
         #self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = [eff_link]
         
-        # Cone and sphere penalty params
-        sphere_penalty_r = 0.15 # 10cm
-        cone_penalty_h = 0.20 * 5 # 20cm
-        cone_penalty_r = 0.10 * 5 # 10cm
-
-        ## Orientation tracking params
-        orientation_tracking_sin_weight = -0.2 # negative
-        orientation_tracking_sin_dist_thresh = 0.15 # 15cm
-
-        ## Position tracking params
-        self.rewards.end_effector_position_tracking.weight = -0.8 # negative
-        self.rewards.end_effector_position_tracking_fine_grained.weight = 1e-5 #0.4 # positive !
+        # Sphere penalty params
+        sphere_penalty_r = 0.15 # 15cm
+        sphere_penalty_weight = 5.0  # positive
         
+        # Cone penalty params
+        cone_penalty_h = 0.20 # 20cm
+        cone_penalty_r = 0.10 # 10cm
+        cone_penalty_weight = -150 # negative
+
         # Action rate params
         self.rewards.action_rate.weight = -0.005 # negative
         
         # Joint velocity params
         self.rewards.joint_vel.weight = -0.005 # negative
 
+        ## Orientation tracking params
+        orientation_tracking_sin_dist_thresh = 0.10 # 10cm
+        orientation_tracking_sin_weight = -0.50 # negative
+
+        ## Position tracking params
+        self.rewards.end_effector_position_tracking_fine_grained.weight = 0.25 #0.4 # positive !
+        self.rewards.end_effector_position_tracking.weight = -0.75 # negative
+        
+
+        # ALIGN ONLY Z AXIS, WITHOUT END EFFECTOR TRANSFORM
+        # self.rewards.end_effector_orientation_tracking = RewardTermCfg(
+        #     func=mdp_skimmer.orientation_tracking_sin,
+        #     weight=orientation_tracking_sin_weight,  # negative
+        #     params={
+        #         "asset_cfg": scene_entity_cfg,
+        #         "command_name": ee_pose_cmd,
+        #         "distance_threshold": orientation_tracking_sin_dist_thresh,
+        #     }
+        # )
+
+        orientation_tracking_eff_transform_z_target_dist_thresh = 0.10 # 10cm
+        orientation_tracking_eff_transform_z_target_weight = -0.50 # negative
+        
         self.rewards.end_effector_orientation_tracking = RewardTermCfg(
-            func=mdp_skimmer.orientation_tracking_sin,
-            weight=orientation_tracking_sin_weight,  # negative
+            func=mdp_skimmer.orientation_tracking_eff_transform_z_target,
+            weight=orientation_tracking_eff_transform_z_target_weight,  # negative
             params={
                 "asset_cfg": scene_entity_cfg,
                 "command_name": ee_pose_cmd,
-                "distance_threshold": orientation_tracking_sin_dist_thresh,
+                "distance_threshold": orientation_tracking_eff_transform_z_target_dist_thresh,
             }
         )
 
@@ -150,7 +173,7 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
 
         self.rewards.cone_penalty = RewardTermCfg(
             func=mdp_skimmer.cone_penalty,
-            weight=-15,
+            weight=cone_penalty_weight,
             params={
                 "asset_cfg": scene_entity_cfg,
                 "command_name": ee_pose_cmd,
@@ -164,13 +187,28 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # 3.3. Add sphere penalty for collision avoidance
         self.rewards.sphere_penalty = RewardTermCfg(
             func=mdp_skimmer.sphere_penalty,
-            weight=1, # positive
+            weight=sphere_penalty_weight,
             params={
                 "asset_cfg": scene_entity_cfg,
                 "command_name": ee_pose_cmd,
                 "sphere_r": sphere_penalty_r,
             }
         )
+
+         # Add event to terminate episode if touching spherical shell from top
+        # self.terminations.collision_from_top = TerminationTermCfg(
+        #     func=mdp_skimmer.collision_from_top,
+        #     params={
+        #         "asset_cfg": scene_entity_cfg,
+        #         "command_name": ee_pose_cmd,
+        #         "sphere_r": 0.10, # 12cm
+        #         # height of the plane as a function of the sphere radius
+        #         # 0.0 means the plane is at the bottom of the sphere
+        #         # 0.5 means the plane is at the middle of the sphere
+        #         # 1.0 means the plane is at the top of the sphere
+        #         "plane_h_percentage": 0.7,
+        #     }
+        # ) 
 
         # ERRO DE std >= 0.0 ESTÁ AQUI
         # self.rewards.manipulability = RewardTermCfg(
@@ -237,3 +275,30 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # # Set the overall scale to 1.0 since we are controlling individual parts
         # self.commands.ee_pose.goal_pose_visualizer_cfg.markers["frame"].scale = (0.025, 0.025, 0.15) # Z axis 10x bigger
         # self.commands.ee_pose.current_pose_visualizer_cfg.markers["frame"].scale = (0.025, 0.025, 0.20) # Z axis 10x bigger
+
+
+        # viz_cfg = self.commands.ee_pose
+        # print("viz_cfg.goal_pose_visualizer_cfg: ", viz_cfg.goal_pose_visualizer_cfg)
+        # print("viz_cfg.current_pose_visualizer_cfg: ", viz_cfg.current_pose_visualizer_cfg)
+        # print("viz_cfg.goal_pose_visualizer_cfg.markers: ", viz_cfg.goal_pose_visualizer_cfg.markers)
+        # print("viz_cfg.current_pose_visualizer_cfg.markers: ", viz_cfg.current_pose_visualizer_cfg.markers)
+        # print("viz_cfg.goal_pose_visualizer_cfg.markers['frame']: ", viz_cfg.goal_pose_visualizer_cfg.markers["frame"])
+        # print("viz_cfg.current_pose_visualizer_cfg.markers['frame']: ", viz_cfg.current_pose_visualizer_cfg.markers["frame"])
+
+        # # make Z-axis long & visible, hide X/Y
+        # thin_axes_props = sim_utils.UsdPropertiesCfg(
+        #     prop_double={
+        #         # X-axis
+        #         "Frame/X_line.radius": 0.01,
+        #         "Frame/X_tip.radius": 0.05,
+        #         # Y-axis
+        #         "Frame/Y_line.radius": 0.01,
+        #         "Frame/Y_tip.radius": 0.05,
+        #         # Z-axis
+        #         "Frame/Z_line.radius": 0.01,
+        #         "Frame/Z_tip.radius": 0.05,
+        #     }
+        # )
+        # exit()
+        # viz_cfg.goal_pose_visualizer_cfg.markers["frame"].usd_props    = thin_axes_props
+        # viz_cfg.current_pose_visualizer_cfg.markers["frame"].usd_props = thin_axes_props

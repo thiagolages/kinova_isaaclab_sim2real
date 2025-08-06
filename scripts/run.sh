@@ -17,6 +17,7 @@ PLAY_SCRIPT="play_skimmer.py"
 N_ITER=500
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_FULL_NAME="/workspace/kinova_isaaclab_sim2real/logs/$RL_LIB/skimmer_gen3/$RUN_NAME"
+PYTHON="/isaac-sim/python.sh"
 
 if [ "$TYPE" == "play" ]; then
     RUN_FULL_NAME=$BASE_FULL_NAME/model_$((N_ITER-1)).pt
@@ -37,11 +38,11 @@ if [ -z "$RUN_NAME" ] || [[ ! "$RUN_NAME" =~ ^[0-9]{2,} ]]; then
 fi
 
 if [ "$TYPE" == "train" ]; then
-    CMD="python $SCRIPT_DIR/$RL_LIB/$TRAIN_SCRIPT --task $RL_ENV_NAME --max_iterations $N_ITER --run_name $RUN_NAME --headless $*"
+    CMD="$PYTHON $SCRIPT_DIR/$RL_LIB/$TRAIN_SCRIPT --task $RL_ENV_NAME --max_iterations $N_ITER --run_name $RUN_NAME $*"
     echo "$CMD"
     eval $CMD
 elif [ "$TYPE" == "play" ]; then
-    CMD="python $SCRIPT_DIR/$RL_LIB/$PLAY_SCRIPT --task $RL_ENV_NAME --checkpoint $RUN_FULL_NAME $*"
+    CMD="$PYTHON $SCRIPT_DIR/$RL_LIB/$PLAY_SCRIPT --task $RL_ENV_NAME --checkpoint $RUN_FULL_NAME $*"
     echo "$CMD"
     eval $CMD
 else

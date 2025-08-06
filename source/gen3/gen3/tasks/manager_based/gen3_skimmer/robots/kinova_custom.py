@@ -9,7 +9,7 @@ ASSETS_PATH = os.environ.get("ASSETS_PATH", "/workspace/research/assets")
 """Configuration of Kinova Gen3 (7-Dof) arm with an attached Strainer."""
 THIAGO_KINOVA_GEN3_N7_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ASSETS_PATH}/usd/robot.usd",
+        usd_path=f"{ASSETS_PATH}/usd/robot_test.usd", #robot_skimmer.usd",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=5.0,

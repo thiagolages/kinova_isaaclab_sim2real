@@ -10,9 +10,13 @@ from typing import TYPE_CHECKING
 import math
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import wrap_to_pi
-from isaaclab.assets import RigidObject
-from isaaclab.utils.math import combine_frame_transforms, quat_mul, angle_between_vecs
+from isaaclab.utils.math import (
+    wrap_to_pi,
+    combine_frame_transforms,
+    quat_mul,
+    angle_between_vecs,
+    convert_quat
+)
 from scipy.spatial.transform import Rotation as R
 
 if TYPE_CHECKING:
@@ -29,31 +33,20 @@ def joint_pos_target_l2(env: ManagerBasedRLEnv, target: float, asset_cfg: SceneE
     # compute the reward
     return torch.sum(torch.square(joint_pos - target), dim=1)
 
-def get_z_axis(quat, effector: bool = True) -> torch.Tensor:
-    if effector:
-        eff_quat_w = quat
-        eff_quat_w_xyzw = torch.cat([eff_quat_w[:, 1:], eff_quat_w[:, :1]], dim=1).cpu().numpy()  # (num_envs, 4)
-        eff_quat_w_xyzw_rot_mat = R.from_quat(eff_quat_w_xyzw)
-        eff_rotmat = torch.from_numpy(eff_quat_w_xyzw_rot_mat.as_matrix()).to(eff_quat_w.device).type(eff_quat_w.dtype)  # (num_envs, 3, 3)
-        z_axis = eff_rotmat[:, :, 2]  # (num_envs, 3)
-        # print("eff_quat_w[0]:", eff_quat_w[0])
-        # print("eff_quat_w_xyzw[0]:", eff_quat_w_xyzw[0])
-        # print("eff_quat_w_xyzw_rot_mat[0]:\n", eff_quat_w_xyzw_rot_mat[0].as_matrix())
-        # print("eff_rotmat[0]:", eff_rotmat[0])
-        # print("eff_z_axis[0]:", z_axis[0])
-    else:
-        des_quat_w = quat
-        des_quat_w_xyzw = torch.cat([des_quat_w[:, 1:], des_quat_w[:, :1]], dim=1).cpu().numpy()  # (num_envs, 4)
-        des_quat_w_xyzw_rot_mat = R.from_quat(des_quat_w_xyzw)
-        target_rotmat = torch.from_numpy(des_quat_w_xyzw_rot_mat.as_matrix()).to(des_quat_w.device).type(des_quat_w.dtype)  # (num_envs, 3, 3)
-        z_axis = target_rotmat[:, :, 2]  # (num_envs, 3)
-        # print("des_quat_w[0]:", des_quat_w[0])
-        # print("des_quat_w_xyzw[0]:", des_quat_w_xyzw[0])
-        # print("des_quat_w_xyzw_rot_mat[0]:\n", des_quat_w_xyzw_rot_mat[0].as_matrix())
-        # print("target_rotmat[0]:", target_rotmat[0])
-        # print("target_z[0]:", z_axis[0])
+def get_axis_from_quat(axis: str, quat: torch.Tensor) -> torch.Tensor:
+    axis_mapping = {
+        "x": 0,
+        "y": 1,
+        "z": 2,
+    }
+    axis_idx = axis_mapping[axis]
+    quat_xyzw = torch.cat([quat[:, 1:], quat[:, :1]], dim=1).cpu().numpy()  # (num_envs, 4)
+    quat_xyzw_rot_mat = R.from_quat(quat_xyzw)
+    target_rotmat = torch.from_numpy(quat_xyzw_rot_mat.as_matrix()).to(quat.device).type(quat.dtype)  # (num_envs, 3, 3)
+    axis = target_rotmat[:, :, axis_idx]  # (num_envs, 3)
+
     
-    return z_axis
+    return axis
 
 def orientation_tracking_sin(
     env: "ManagerBasedRLEnv",
@@ -71,12 +64,12 @@ def orientation_tracking_sin(
 
     # Get the end-effector orientation in world frame
     eff_quat_w = robot.data.body_state_w[:, asset_cfg.body_ids[0], 3:7]  # (num_envs, 4), (w, x, y, z)
-    eff_z_axis = get_z_axis(eff_quat_w, effector=True)
+    eff_z_axis = get_axis_from_quat("z", eff_quat_w)
 
     # Target Z
     des_quat_b = command[:, 3:7]
     des_quat_w = quat_mul(robot.data.root_quat_w, des_quat_b)
-    target_z = get_z_axis(des_quat_w, effector=False)
+    target_z = get_axis_from_quat("z", des_quat_w)
 
     theta_deg = angle_between_vecs(eff_z_axis, target_z)
 
@@ -111,6 +104,158 @@ def orientation_tracking_sin(
 
     return reward
 
+def orientation_tracking_eff_transform_z_target(
+    env: "ManagerBasedRLEnv",
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    distance_threshold: float = 0.2,  # default threshold, can be overridden
+) -> torch.Tensor:
+    """
+    Transform the end-effector from (Z forward, X down) to (Z up, X forward).
+    Align the end-effector new Z axis with the target Z axis.
+    Penalty occurs only if the end-effector is within a distance threshold from
+    the target. Otherwise, reward is zero.
+    """
+    # Get the robot articulation
+    robot: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+
+    # Get target pose in robot base frame
+    target_pos_b = command[:, :3]
+    target_quat_b = command[:, 3:7]
+
+    # Get robot base pose
+    root_pos_w = robot.data.root_state_w[:, :3]
+    root_quat_w = robot.data.root_state_w[:, 3:7]
+
+    # Convert target pose to world frame
+    target_pos_w, target_quat_w = combine_frame_transforms(
+        root_pos_w,
+        root_quat_w,
+        target_pos_b,
+        target_quat_b
+    )  # (num_envs, 3)
+
+    eff_pos_w = robot.data.body_pos_w[:, asset_cfg.body_ids[0]]
+    eff_quat_w = robot.data.body_quat_w[:, asset_cfg.body_ids[0]]
+
+
+    # Get the end-effector orientation directly in world frame
+    # eff_pos_w = robot.data.body_state_w[:, asset_cfg.body_ids[0], :3]  # (num_envs, 3) - already in world frame
+    # eff_quat_w = robot.data.body_state_w[:, asset_cfg.body_ids[0], 3:7]  # (num_envs, 4), (w, x, y, z) - already in world frame
+
+    
+    # print("target_pos_b =", target_pos_b)
+    # print("target_pos_b.shape =", target_pos_b.shape)
+    # print("target_quat_b =", target_quat_b)
+    # print("target_quat_b.shape =", target_quat_b.shape)
+    
+    # print("target_pos_w =", target_pos_w)
+    # print("target_pos_w.shape =", target_pos_w.shape)
+    # print("target_quat_w =", target_quat_w)
+    # print("target_quat_w.shape =", target_quat_w.shape)
+
+    # print("eff_pos_w =", eff_pos_w)
+    # print("eff_pos_w.shape =", eff_pos_w.shape)
+    # print("eff_quat_w =", eff_quat_w)
+    # print("eff_quat_w.shape =", eff_quat_w.shape)
+
+   
+    # Convert to (x, y, z, w) format (scipy)
+    eff_quat_w = convert_quat(eff_quat_w, to="xyzw")
+    
+    # # Get rotation before 90deg Y rotation
+    # eff_quat_before_xyzw = eff_quat_w[0].cpu().numpy()  # (x, y, z, w)
+    # eff_quat_before_euler = R.from_quat(eff_quat_before_xyzw).as_euler('xyz', degrees=True)
+    
+    # Apply rotation of -90 deg around Y axis
+    rot_90_y = R.from_euler('xyz', [0.0, -math.pi / 2.0, 0.0])
+    eff_quat_w_rot_mat = R.from_quat(eff_quat_w.cpu().numpy()).as_matrix() # (num_envs, 3, 3)
+    eff_quat_w_rot_mat = eff_quat_w_rot_mat @ rot_90_y.as_matrix() # (num_envs, 3, 3)
+    eff_quat_w_quat_xyzw = R.from_matrix(eff_quat_w_rot_mat).as_quat() # (num_envs, 4)
+    eff_quat_w_quat_xyzw = torch.from_numpy(eff_quat_w_quat_xyzw).to(dtype=eff_quat_w.dtype, device=eff_quat_w.device)
+    
+    # # Get rotation after 90deg Y rotation
+    # eff_quat_after_xyzw = eff_quat_w_quat_xyzw[0].cpu().numpy()  # (x, y, z, w)
+    # eff_quat_after_euler = R.from_quat(eff_quat_after_xyzw).as_euler('xyz', degrees=True)
+
+    # Convert back to (w, x, y, z) format
+    eff_quat_w = convert_quat(eff_quat_w_quat_xyzw, to="wxyz")
+
+    # #######################################################
+    # print("Test using identity rot and 180deg X rotation:")
+    # test_w = torch.tensor( # wxyz format
+    #     [
+    #      [1.0, 0.0, 0.0, 0.0], # identity
+    #      [0.0, 1.0, 0.0, 0.0],
+    #      [0.0, 0.0, 1.0, 0.0],
+    #      [0.0, 0.0, 0.0, 1.0],
+    #      [1.0, 0.0, 0.0, 0.0], # identity
+    #     ], # (5, 4)
+    #     dtype=eff_quat_w.dtype,
+    #     device=eff_quat_w.device
+    # )
+    # # Convert to (x, y, z, w) format (scipy)
+    # test_w = convert_quat(test_w, to="xyzw")
+    
+    # # Rotate
+    # print("Rotating test_w by -90deg around Y axis")
+    # rot_90_y = R.from_euler('xyz', [0.0, -math.pi / 2.0, 0.0])
+    # print("rot_90_y = \n", rot_90_y.as_matrix())
+    # test_w_rot_mat = R.from_quat(test_w.cpu().numpy()).as_matrix() # (num_envs, 3, 3)
+    # print("test_w_rot_mat before rotation = \n", test_w_rot_mat)
+    # test_w_rot_mat = test_w_rot_mat @ rot_90_y.as_matrix() # (num_envs, 3, 3)
+    # print("test_w_rot_mat after rotation = \n", test_w_rot_mat)
+    # test_w_quat_xyzw = R.from_matrix(test_w_rot_mat).as_quat() # (num_envs, 4)
+    # print("test_w_quat_xyzw after rotation (quat xyzw) = \n", test_w_quat_xyzw)
+    # test_w_quat_xyzw = torch.from_numpy(test_w_quat_xyzw).to(dtype=eff_quat_w.dtype, device=eff_quat_w.device)
+    # print("test_w_quat_xyzw after rotation (quat xyzw), on the GPU = \n", test_w_quat_xyzw)
+    # # Convert back to (w, x, y, z) format
+    # test_w = convert_quat(test_w_quat_xyzw, to="wxyz")
+    # print("test_w (wxyz) = \n", test_w)
+    
+    # ######################################################
+
+    # print("eff_quat_before_xyzw = \n", eff_quat_before_xyzw)
+    # print("eff_quat_w before rotation = \n", eff_quat_before_euler)
+    # print("eff_quat_after_xyzw = \n", eff_quat_after_xyzw)
+    # print("eff_quat_w after rotation = \n", eff_quat_after_euler)
+    # print("eff_quat_w Final = \n", eff_quat_w[0].cpu().numpy())
+
+    # Get the 'new' end-effector Z axis in world frame
+    eff_z_axis = get_axis_from_quat("z", eff_quat_w)
+    # print("eff_z_axis = \n", eff_z_axis)
+
+    # Target Z
+    # des_quat_b = command[:, 3:7]
+    # des_quat_w = quat_mul(robot.data.root_quat_w, des_quat_b)
+    # target_z = get_axis_from_quat("z", des_quat_w)
+    
+    target_z = get_axis_from_quat("z", target_quat_w)
+    # print("target_z = \n", target_z)
+
+    theta_deg = angle_between_vecs(eff_z_axis, target_z)
+    # print("theta_deg = \n", theta_deg)
+
+    # Compute reward as 1 - cos(theta)
+    reward = 1.0 - torch.cos(torch.deg2rad(theta_deg))  # Convert degrees to radians and compute cos(theta)
+    # print("reward = \n", reward)
+
+    # --- Compute distance between end-effector and target ---
+    # Compute Euclidean distance
+    # dist = torch.linalg.norm(eff_pos_b - target_pos_w, dim=1)  # (num_envs,)
+    # print("dist = \n", dist)
+
+    # Only apply orientation penalty if within threshold, else reward is zero
+    # mask = dist <= distance_threshold
+    # reward = reward * mask.float()
+    # print("reward after mask = \n", reward)
+
+    if torch.isnan(reward).any() or torch.isinf(reward).any():
+        raise RuntimeError("ERROR: NaN or Inf detected in orientation_tracking_eff_transform_z_target reward!")
+
+    return reward
+
 
 def end_effector_orientation_tracking_tanh(
     env: ManagerBasedRLEnv,
@@ -123,6 +268,74 @@ def end_effector_orientation_tracking_tanh(
     reward = orientation_tracking_sin(env, asset_cfg, command_name)
 
     return 1.0 - torch.tanh(reward / std)  # Normalize the reward with a tanh kernel
+
+def collision_from_top(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    command_name: str,
+    sphere_r: float = None,
+    plane_h_percentage: float = None,
+) -> torch.Tensor:
+    """Terminate the episode if the end-effector touches the spherical shell from the top."""
+    
+    if sphere_r is None or plane_h_percentage is None:
+        raise ValueError("sphere_r and plane_h_percentage must be provided.")
+    
+    if sphere_r <= 0 or plane_h_percentage < 0 or plane_h_percentage > 1:
+        raise ValueError("sphere_r must be positive and plane_h_percentage must be between 0 and 1.")
+
+    ## 1.1. Get robot articulation and command
+    robot: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    
+    ## Get robot pose
+    robot_pos_w = robot.data.root_state_w[:, :3]
+    robot_quat_w = robot.data.root_state_w[:, 3:7] # (w, x, y, z) format
+
+    ## 1.2. Get target pose
+    target_pos_b = command[:, :3] # (num_envs, 3)
+    target_quat_b = command[:, 3:7] # (num_envs, 4)
+
+    # Convert target pose to world frame (equals sphere center pose)
+    sphere_pos_w, sphere_quat_w = combine_frame_transforms(
+        robot_pos_w,
+        robot_quat_w,
+        target_pos_b,
+        target_quat_b
+    ) # (num_envs, 3)
+
+    ## 1.3. Get effector pose
+    # asset_cfg.body_ids[0] should be the index of the end-effector link
+    eff_pos_w = robot.data.body_state_w[:, asset_cfg.body_ids[0], :3] # (num_envs, 3) # type: ignore
+
+    rot = R.from_quat(sphere_quat_w.cpu().numpy())
+    offset = torch.tensor([0.0, 0.0, sphere_r * plane_h_percentage])
+    offset_w = rot.apply(offset) # (num_envs, 3)
+
+    plane_pos_w = sphere_pos_w + torch.from_numpy(offset_w).to(eff_pos_w.device).type(eff_pos_w.dtype) # (num_envs, 3)
+
+    # No need to normalize
+    plane_normal_w = torch.from_numpy(offset_w).to(eff_pos_w.device).type(eff_pos_w.dtype) # (num_envs, 3)
+
+    # Vector from sphere center to effector in world frame
+    vec_plane_to_eff_w = eff_pos_w - plane_pos_w
+
+    #vec_sphere_to_plane_w = sphere_pos_w + torch.from_numpy(offset_w).to(eff_pos_w.device).type(eff_pos_w.dtype) # (num_envs, 3)
+    # vec_sphere_to_plane_w = torch.from_numpy(offset_w).to(eff_pos_w.device).type(eff_pos_w.dtype) # (num_envs, 3)
+
+    # Compute signed distance: positive if effector is above the plane, negative if below
+    signed_dist_to_plane = (vec_plane_to_eff_w * plane_normal_w).sum(dim=1)  # (num_envs,)
+
+    ## 1.4. Calculate distance between effector and target
+    dist_eff_to_sphere_center = torch.norm(eff_pos_w - sphere_pos_w, dim=1)  # (num_envs,)
+    
+    termination = (dist_eff_to_sphere_center <= sphere_r) & (signed_dist_to_plane >= 0) # (num_envs,)
+
+    return termination
+
+    # print("dist_eff_to_sphere_center = ", dist_eff_to_sphere_center)
+    # print("dist_eff_to_sphere_center.shape = ", dist_eff_to_sphere_center.shape)
+
 
 def sphere_penalty(
     env: ManagerBasedRLEnv,
@@ -247,21 +460,21 @@ def cone_penalty(env: ManagerBasedRLEnv,
     
     ## 2.2. Compute the effector height with respect to the target XY plane
     eff_cone_height = dist_eff_to_target_xy_plane(eff_pos_w, (target_pos_w, target_quat_w)) # (num_envs,)
-    #print("eff_cone_height = ", eff_cone_height)
-    #print("eff_cone_height.shape = ", eff_cone_height.shape)
+    # print("eff_cone_height = ", eff_cone_height)
+    # print("eff_cone_height.shape = ", eff_cone_height.shape)
 
     ## 2.3. Compute the effector distance to the cone Z axis
     dist_to_cone_axis = dist_eff_to_target_z_axis(eff_pos_w, (target_pos_w, target_quat_w)) # (num_envs,)
-    #print("dist_to_cone_axis = ", dist_to_cone_axis) 
-    #print("dist_to_cone_axis.shape = ", dist_to_cone_axis.shape)
+    # print("dist_to_cone_axis = ", dist_to_cone_axis) 
+    # print("dist_to_cone_axis.shape = ", dist_to_cone_axis.shape)
 
     ## 2.4. Calculate the radius at the current height as r = h * tan(theta/2)
     r_at_current_h = torch.maximum(
         eff_cone_height * math.tan(math.radians(theta / 2.0)),
         torch.tensor(1e-5, device=eff_cone_height.device, dtype=eff_cone_height.dtype)
     ) # (num_envs,)
-    #print("r_at_current_h = ", r_at_current_h)
-    #print("r_at_current_h.shape = ", r_at_current_h.shape)
+    # print("r_at_current_h = ", r_at_current_h)
+    # print("r_at_current_h.shape = ", r_at_current_h.shape)
 
     ### 3. Define multipliers
 
@@ -270,13 +483,13 @@ def cone_penalty(env: ManagerBasedRLEnv,
     # approach the target.
     delta_r = torch.clamp(delta_r / r_at_current_h, 0.0, 10.0) # (num_envs,)
 
-    #print("delta_r = ", delta_r)
-    #print("delta_r.shape = ", delta_r.shape)
+    # print("delta_r = ", delta_r)
+    # print("delta_r.shape = ", delta_r.shape)
 
     ## 3.2. delta_h scales penalty by how close we are from the target, in the Z direction of the cone (its height)
     delta_h = torch.clamp(delta_h * (cone_h - eff_cone_height) / cone_h, 0.0, 10.0) # (num_envs,)
-    #print("delta_h = ", delta_h)
-    #print("delta_h.shape = ", delta_h.shape)
+    # print("delta_h = ", delta_h)
+    # print("delta_h.shape = ", delta_h.shape)
     # TODO: check if needs to be normalized
 
     ### 4. Check if effector is inside penalty cone
@@ -288,11 +501,11 @@ def cone_penalty(env: ManagerBasedRLEnv,
     eps_error = (1e-5 + torch.rand(1).item() * 4e-5)
 
     mask = (dist_to_cone_axis > r_at_current_h) | (eff_cone_height > cone_h) | (eff_cone_height < 0)
-    #print("mask = ", mask)
-    #print("mask.shape = ", mask.shape)
+    # print("mask = ", mask)
+    # print("mask.shape = ", mask.shape)
     r_error = torch.where(mask, torch.ones_like(dist_to_cone_axis) * eps_error, r_at_current_h - dist_to_cone_axis)
-    #print("r_error = ", r_error)
-    #print("r_error.shape = ", r_error.shape)
+    # print("r_error = ", r_error)
+    # print("r_error.shape = ", r_error.shape)
     # if dist_to_cone_axis > r_at_current_h or eff_cone_height > cone_h:
     #     r_error = 0
     # else:

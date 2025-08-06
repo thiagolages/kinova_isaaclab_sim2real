@@ -1,14 +1,14 @@
 import torch
 from scipy.spatial.transform import Rotation as R
-from isaaclab.utils.math import quat_apply
+from isaaclab.utils.math import quat_apply, convert_quat
 
 def dist_eff_to_target_z_axis(eff_pos, target):
     """
     Compute the distance from the end effector to a line defined by a target position and rotation.
     Position needs to be in the world frame, rotation is a 3x3 rotation matrix.
     Args:
-        eff_pos: Effector position (3D vector).
-        target: A tuple (target_position, target_rotation) where target_position is a 3D vector and target_rotation is a quaternion (4D vector) in scalar-last format.
+        eff_pos: Effector position (3D vector) (num_envs, 3)
+        target: A tuple (target_position, target_rotation) where target_position is a 3D vector and target_rotation is a quaternion (4D vector) in scalar-last format. ((num_envs, 3), (num_envs, 4))
     Returns:
         The distance from the end effector to the line defined by the target position and rotation.
     """
@@ -28,26 +28,42 @@ def dist_eff_to_target_z_axis(eff_pos, target):
     # Assuming target_quat is in scalar-first format (w, x, y, z)
 
     #print("target_quat after = ", target_quat)
-    target_rot = torch.tensor(R.from_quat(target_quat.cpu()).as_matrix(),dtype=torch.float, device=eff_pos.device)  # Convert quaternion to rotation matrix
+    # Convert target_quat to xyzw format, which is used by scipy
+    target_quat = convert_quat(target_quat, to="xyzw") # (num_envs, 4)
+    target_rot = torch.tensor(R.from_quat(target_quat.cpu()).as_matrix(),dtype=torch.float, device=eff_pos.device)  # Convert quaternion to rotation matrix (num_envs, 3, 3)
     #print("target_rot = ", target_rot)
     # Sanity check for rotation matrix
     if target_rot.shape[-2:] != (3, 3):
         raise ValueError("target_rot must have shape (num_envs, 3, 3)")
 
-    dz_unit = target_rot[:, 2]  # Extract the z-axis from the rotation matrix
-    #print("dz_unit =", dz_unit)
-    #print("eff_pos =", eff_pos)
-    #print("target_pos =", target_pos)
-    vec = eff_pos - target_pos  # Vector from end effector to target    
-    #print("vec = eff_pos - target_pos = ", vec)
-    proj_length = torch.sum(vec * dz_unit, dim=1, keepdim=True)  # (N, 1)
-    proj_vec = proj_length * dz_unit  # (N, 3)
-    #print("proj_vec =", proj_vec)
-    perp_vec = vec - proj_vec  # Perpendicular vector from effector to the line
-    #print("perp_vec =", perp_vec)
-    dist = torch.norm(perp_vec, dim=1, keepdim=True)  # (N, 1) norm vector
-    #print("dist =", dist)
+    vec = eff_pos - target_pos  # Vector from end effector to target (num_envs, 3)
+
+    dz_unit = target_rot[:, :, 2]  # Extract the z-axis from the rotation matrix (num_envs, 3)
+    # print("dz_unit =", dz_unit)
+    # print("dz_unit.shape =", dz_unit.shape)
+
+    # #print("eff_pos =", eff_pos)
+    # #print("target_pos =", target_pos)
+    # vec = eff_pos - target_pos  # Vector from end effector to target (num_envs, 3)
+    # #print("vec = eff_pos - target_pos = ", vec)
+    # proj_length = torch.sum(vec * dz_unit, dim=-1, keepdim=True)  # (N, 1)
+    # proj_vec = proj_length * dz_unit  # (N, 3)
+    # #print("proj_vec =", proj_vec)
+    # perp_vec = vec - proj_vec  # Perpendicular vector from effector to the line
+    # #print("perp_vec =", perp_vec)
+    # dist = torch.norm(perp_vec, dim=1, keepdim=True)  # (N, 1) norm vector
+    # #print("dist =", dist)
+    # dist = dist.squeeze(-1)
+
+    #### dist
+    # dz_unit is a unit vector, and the fomula is:
+    # |AB x AP| / |AB|, P being the point, and AB points in the line
+    dist = torch.norm(torch.cross(dz_unit, vec, dim=-1), dim=-1, keepdim=True) # / torch.norm(dz_unit, dim=-1, keepdim=True)
+    # print("dist =", dist)
+    # print("dist.shape before squeeze =", dist.shape)
     dist = dist.squeeze(-1)
+    # print("dist =", dist)
+    # print("dist.shape after squeeze =", dist.shape)
 
     return dist
 
@@ -64,9 +80,12 @@ def dist_eff_to_target_xy_plane(eff_pos_w, target_w):
     target_pos_w, target_quat_w = target_w  # (num_envs, 3), (num_envs, 4)
     
     # The Z axis in the target_w frame (in world coordinates)
-    z_axis = torch.zeros_like(target_pos_w)
-    z_axis[:, 2] = 1.0
+    z_axis = torch.zeros_like(target_pos_w) # (num_envs, 3)
+    z_axis[:, 2] = 1.0 # (num_envs,)
+    # print("z_axis =", z_axis)
+    # print("z_axis.shape =", z_axis.shape)
     
+
     # Rotate z_axis by target_quat_w to get world normal direction
     # print("target_quat_w = ", target_quat_w)
     # print("z_axis = ", z_axis)
@@ -75,7 +94,9 @@ def dist_eff_to_target_xy_plane(eff_pos_w, target_w):
     
     # Vector from plane point to effector
     vec = eff_pos_w - target_pos_w  # (num_envs, 3)
-
+    # print("vec =", vec)
+    # print("vec.shape =", vec.shape)
+    
     # print("vec = eff_pos_w - target_pos_w = ", vec)
     # print("vec * z_axis_world = ", vec * z_axis_world)
     
@@ -83,5 +104,6 @@ def dist_eff_to_target_xy_plane(eff_pos_w, target_w):
     # The * operator is doing a dot product
     # print("vec * z_axis_world = ",vec * z_axis_world)
     signed_dist = torch.sum(vec * z_axis_world, dim=1)
-    
+    # print("signed_dist =", signed_dist)
+    # print("signed_dist.shape =", signed_dist.shape)
     return signed_dist

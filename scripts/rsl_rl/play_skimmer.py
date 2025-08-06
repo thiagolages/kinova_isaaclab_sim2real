@@ -242,6 +242,7 @@ def main():
         if old_cmd_buf is not None and not torch.allclose(old_cmd_buf, cmd_buf[0]):
             target_changed = True
             print(f"[INFO] Target changed at timestep {count}!")
+            print(f"target is now at {cmd_buf[0]}")
         
         old_cmd_buf = cmd_buf[0].clone()
 
