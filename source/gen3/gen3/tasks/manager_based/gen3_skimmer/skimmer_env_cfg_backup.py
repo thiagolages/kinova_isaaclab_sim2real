@@ -172,18 +172,18 @@ class Gen3SkimmerEnvCfg(ReachEnvCfg):
         # 3.2. Add cone penalty for collision avoidance
 
 
-        # self.rewards.cone_penalty = RewardTermCfg(
-        #     func=mdp_skimmer.cone_penalty,
-        #     weight=cone_penalty_weight,
-        #     params={
-        #         "asset_cfg": scene_entity_cfg,
-        #         "command_name": ee_pose_cmd,
-        #         "cone_h": cone_penalty_h,
-        #         "cone_r": cone_penalty_r,
-        #         "delta_r": 1.0,
-        #         "delta_h": 1.0,
-        #     }
-        # )
+        self.rewards.cone_penalty = RewardTermCfg(
+            func=mdp_skimmer.cone_penalty,
+            weight=cone_penalty_weight,
+            params={
+                "asset_cfg": scene_entity_cfg,
+                "command_name": ee_pose_cmd,
+                "cone_h": cone_penalty_h,
+                "cone_r": cone_penalty_r,
+                "delta_r": 1.0,
+                "delta_h": 1.0,
+            }
+        )
 
         # 3.3. Add sphere penalty for collision avoidance
         # self.rewards.sphere_penalty = RewardTermCfg(

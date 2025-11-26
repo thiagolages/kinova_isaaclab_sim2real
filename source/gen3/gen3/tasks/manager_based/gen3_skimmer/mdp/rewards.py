@@ -386,7 +386,16 @@ def sphere_penalty(
     # print("dist_eff_to_sphere_center.shape = ", dist_eff_to_sphere_center.shape)
     
     ## 1.5. Calculate penalty
-    penalty = torch.minimum((dist_eff_to_sphere_center - sphere_r) / sphere_r, torch.zeros_like(dist_eff_to_sphere_center))
+    # Create a mask for elements inside or on the sphere (distance <= sphere_r)
+    inside_mask = dist_eff_to_sphere_center <= sphere_r
+    # Initialize penalty as zeros
+    penalty = torch.zeros_like(dist_eff_to_sphere_center)
+    # For elements inside the sphere, compute the penalty
+    penalty[inside_mask] = (dist_eff_to_sphere_center[inside_mask] - sphere_r) / sphere_r
+    # For elements outside the sphere, penalty remains zero
+    # penalty = torch.minimum((dist_eff_to_sphere_center - sphere_r) / sphere_r, torch.zeros_like(dist_eff_to_sphere_center))
+    epsilon = (1e-5 + torch.rand(1).item() * 4e-5)
+    penalty = torch.clamp(penalty, min=-epsilon, max=0)
     
     # print("sphere penalty = ", penalty)
     # print("sphere penalty.shape = ", penalty.shape)
@@ -500,7 +509,7 @@ def cone_penalty(env: ManagerBasedRLEnv,
     # but still make it so it's not a sparse reward
     eps_error = (1e-5 + torch.rand(1).item() * 4e-5)
 
-    mask = (dist_to_cone_axis > r_at_current_h) | (eff_cone_height > cone_h) | (eff_cone_height < 0)
+    mask = (dist_to_cone_axis > r_at_current_h) | (eff_cone_height > cone_h) | (eff_cone_height < 0) # 2.5cm clearence
     # print("mask = ", mask)
     # print("mask.shape = ", mask.shape)
     r_error = torch.where(mask, torch.ones_like(dist_to_cone_axis) * eps_error, r_at_current_h - dist_to_cone_axis)

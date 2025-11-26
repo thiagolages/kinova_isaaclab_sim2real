@@ -1,3 +1,4 @@
+import math
 import os
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -23,13 +24,15 @@ THIAGO_KINOVA_GEN3_N7_CFG = ArticulationCfg(
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos={
+            # Define a proper home pose for the Kinova Gen3
+            # This pose should be safe, reachable, and provide good workspace access
             "joint_1": 0.0,
-            "joint_2": 0.65,
-            "joint_3": 0.0,
-            "joint_4": 1.89,
-            "joint_5": 0.0,
-            "joint_6": 0.6,
-            "joint_7": -1.57,
+            "joint_2": math.radians(-7.1),
+            "joint_3": math.radians(10),
+            "joint_4": math.radians(110.0),
+            "joint_5": math.radians(-19.4),
+            "joint_6": math.radians(36.8),
+            "joint_7": math.radians(-90.0),
         },
     ),
     actuators={

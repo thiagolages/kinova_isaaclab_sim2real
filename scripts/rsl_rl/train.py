@@ -188,6 +188,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # Get cone parameters from environment config
         cone_h = 0.20 * 5  # 20cm * 5 = 1.0m
         cone_r = 0.10 * 5  # 10cm * 5 = 0.5m
+        sphere_r = 0.15 * 5  # 15cm * 5 = 0.75m (same as sphere_penalty_r in env config)
         cone_visualizer = create_cone_visualizer(env.unwrapped, cone_r, cone_h)
         print(f"[INFO] Created cone visualizer for {env.unwrapped.num_envs} environments")
 
@@ -230,6 +231,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # Get cone parameters
         cone_h = 0.20 * 5  # 20cm * 5 = 1.0m
         cone_r = 0.10 * 5  # 10cm * 5 = 0.5m
+        sphere_r = 0.15 * 5  # 15cm * 5 = 0.75m (same as sphere_penalty_r in env config)
         
         for iteration in range(num_learning_iterations):
             # Run one iteration of training
@@ -286,14 +288,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         # Create plots
                         plot_trajectory_with_cone(
                             ee_positions_tensor, target_pos_tensor, target_quat_tensor,
-                            cone_r, cone_h, 
+                            cone_r, cone_h, sphere_radius=sphere_r,
                             save_path=os.path.join(trajectory_dir, f"trajectory_2d_iter_{iteration}.png"),
                             show_plot=False
                         )
                         
                         plot_3d_trajectory_with_cone(
                             ee_positions_tensor, target_pos_tensor, target_quat_tensor,
-                            cone_r, cone_h,
+                            cone_r, cone_h, sphere_radius=sphere_r,
                             save_path=os.path.join(trajectory_dir, f"trajectory_3d_iter_{iteration}.png"),
                             show_plot=False
                         )
