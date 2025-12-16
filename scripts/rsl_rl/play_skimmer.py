@@ -180,8 +180,8 @@ def main():
     # home_pos = skimmer_pos + torch.tensor([-0.1, -0.32, 0.20], device=env.unwrapped.device)  # Example position
     #home_pos = torch.tensor([0.3, 0.2, 0.35], device=env.unwrapped.device)  # Good example
     # home_pos = torch.tensor([0.5, 0.2-0.8, 0.35], device=env.unwrapped.device)  # Good example
-    home_pos = torch.tensor([0.5274, 0.1875-0.4+0.4, 0.625], device=env.unwrapped.device)  # Good example (new)
-    # home_pos = torch.tensor([0.4274-0.05, 0.1875-0.7, 0.325], device=env.unwrapped.device)  # Good example (new)
+    # home_pos = torch.tensor([0.5274, 0.1875-0.4+0.4, 0.625], device=env.unwrapped.device)  # Good example (new)
+    home_pos = torch.tensor([0.4274-0.05, 0.1875-0.7, 0.325], device=env.unwrapped.device)  # Good example (new)
     # home_quat = torch.tensor([ 0.7071068, -0.7071068, 0.0,  0.0], device=env.unwrapped.device) # -90deg X (wxyz)
     home_quat = torch.tensor([ 0.7071068, 0.0, 0.7071068,  0.0], device=env.unwrapped.device) # 90deg Y (wxyz)
     # home_quat = torch.tensor([ 1.0, 0.0, 0.0,  0.0], device=env.unwrapped.device) # identity
@@ -202,8 +202,10 @@ def main():
     trajectory_data = []
     end_effector_positions = []
     end_effector_orientations = []
+    actions_list = []
     target_positions = []
     target_orientations = []
+    actions = None
 
     # Get cone parameters from environment config
     cone_h = 0.20 #* 5  # 20cm * 5 = 1.0m
@@ -227,6 +229,43 @@ def main():
         term = cmd_manager.get_term(command_name)
         # Get end-effector position and orientation
         robot = env.unwrapped.scene["robot"]
+
+# If we want to extract joint positions from a saved file with
+# positions and quaternions
+###############################################################################
+        # import numpy as np
+
+        # # Load trajectory data from npz file
+        # traj = np.load("rl_saved_data_nov_25/10_trajectory_data.npz")
+        # ee_positions = traj["target_positions"] #traj["end_effector_positions"]  # shape (N, 3)
+        # ee_orientations = traj["target_orientations"] #traj["end_effector_orientations"]  # shape (N, 4)
+
+        # # Prepare storage for IK results
+        # num_points = ee_positions.shape[0]
+        # rl_q = []
+
+        # prev_q = None
+        # for i in range(num_points):
+        #     pos = ee_positions[i]
+        #     quat = ee_orientations[i]
+        #     # Use previous q as initial guess when possible
+        #     initial_guess = prev_q
+        #     q_sol = robot.inverse_kinematics(
+        #         position=pos, 
+        #         orientation=quat,
+        #         initial_guess=initial_guess
+        #     )
+        #     q_np = q_sol.cpu().numpy() if hasattr(q_sol, "cpu") else q_sol
+        #     rl_q.append(q_np)
+        #     prev_q = q_np  # Update for next iteration
+
+        # rl_q = np.array(rl_q)  # shape (N, num_joints)
+        # np.savez("rl_q.npz", rl_q=rl_q)
+
+        # exit()
+###############################################################################
+
+
         eff_link_id = robot.body_names.index("end_effector_link")
 
         if cmd_buf is None:
@@ -416,6 +455,7 @@ def main():
                         trajectory_file = os.path.join(log_dir, f"{count}_trajectory_data.npz")
                         np.savez(
                             trajectory_file,
+                            actions=np.array(actions_list),
                             end_effector_positions=np.array(end_effector_positions),
                             end_effector_orientations=np.array(end_effector_orientations),
                             target_positions=np.array(target_positions),
@@ -429,6 +469,7 @@ def main():
                 
                     # Reset trajectory recording
                     target_changed = False
+                    actions_list.clear()
                     end_effector_positions.clear()
                     end_effector_orientations.clear()
                     target_positions.clear()
@@ -463,12 +504,16 @@ def main():
                     # base_link_pos = robot.data.body_state_w[0, base_link_id, :3]
                     # ee_pos_w = ee_pos_w - base_link_pos                    
                     
+                    if actions is not None:
+                        actions_list.append(actions.cpu().numpy())
                     end_effector_positions.append(ee_pos_w.cpu().numpy())
                     end_effector_orientations.append(ee_quat_w.cpu().numpy())
                     target_positions.append(target_pos_w.cpu().numpy())
                     target_orientations.append(target_quat_w.cpu().numpy())
 
                     print("##################################################")
+                    # print(f"actions_list                     = {actions_list}")
+                    print(f"len(actions_list)                = {len(actions_list)}")
                     print(f"ee_pos_w                    = {ee_pos_w}")
                     print(f"ee_quat_w                   = {ee_quat_w}")
                     print(f"target_pos_w                = {target_pos_w}")
@@ -494,8 +539,8 @@ def main():
             # env stepping
             obs, _, _, _ = env.step(actions)
 
-            # print("actions[0] = ", actions[0])
-            # print("obs = ", obs[0])
+            print("obs = ", obs[0])
+            print("actions[0] = ", actions[0])
 
         if args_cli.video:
             timestep += 1

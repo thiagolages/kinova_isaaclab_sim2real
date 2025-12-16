@@ -300,7 +300,8 @@ def plot_3d_trajectory_with_cone(
     cone_height: float,                    # Cone height
     sphere_radius: float = None,           # Sphere radius (optional)
     save_path: str = None,                 # Path to save the plot
-    show_plot: bool = True                 # Whether to display the plot
+    show_plot: bool = True,                 # Whether to display the plot
+    midpoint: int = None                   # Midpoint to split the trajectory
 ):
     """
     Plot the 3D end-effector trajectory with the cone penalty region.
@@ -355,7 +356,13 @@ def plot_3d_trajectory_with_cone(
     # Plot trajectory
     ax.scatter(relative_positions[:, 0], relative_positions[:, 1], relative_positions[:, 2], 
                c=range(len(relative_positions)), cmap='viridis', alpha=0.7, s=20)
-    ax.plot(relative_positions[:, 0], relative_positions[:, 1], relative_positions[:, 2], 
+    if midpoint is None:
+        ax.plot(relative_positions[:, 0], relative_positions[:, 1], relative_positions[:, 2], 
+                'b-', alpha=0.5, linewidth=1)
+    else:
+        ax.plot(relative_positions[:midpoint, 0], relative_positions[:midpoint, 1], relative_positions[:midpoint, 2], 
+            'b-', alpha=0.5, linewidth=1)
+        ax.plot(relative_positions[midpoint:, 0], relative_positions[midpoint:, 1], relative_positions[midpoint:, 2], 
             'b-', alpha=0.5, linewidth=1)
     # Highlight the first point as a red square and last as a green square
     ax.scatter(relative_positions[0, 0], relative_positions[0, 1], relative_positions[0, 2], color='red', marker='s', s=45, zorder=5)
